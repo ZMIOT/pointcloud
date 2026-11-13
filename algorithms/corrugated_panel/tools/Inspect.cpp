@@ -39,13 +39,14 @@ bool readTextCloud(const std::filesystem::path &path, std::vector<bwb::Point> &p
 void writePoints(const std::filesystem::path &path,
                  const std::vector<bwb::ProjectedPoint> &points) {
     std::ofstream output(path);
-    output << "source_index x y z is_corner reference_index is_extrapolated extrapolation_distance surface_rms support_count surface_degree\n" << std::setprecision(12);
+    output << "source_index x y z is_corner reference_index is_extrapolated extrapolation_distance surface_rms support_count surface_degree is_projection_fallback\n" << std::setprecision(12);
     for (const auto &point : points)
         output << point.source << ' ' << point.xyz.x() << ' ' << point.xyz.y() << ' '
                << point.xyz.z() << ' ' << (point.corner ? 1 : 0) << ' '
                << point.referenceIndex << ' ' << point.extrapolated << ' '
                << point.extrapolationDistance << ' ' << point.surfaceRms << ' '
-               << point.supportCount << ' ' << point.surfaceDegree << '\n';
+               << point.supportCount << ' ' << point.surfaceDegree << ' '
+               << point.projectionFallback << '\n';
 }
 
 void writeIndexed(const std::filesystem::path &path, const std::vector<bwb::Point> &points,
@@ -116,6 +117,8 @@ int main(int argc, char **argv) {
               << "selected_slice=" << result.selectedSlice << '\n'
               << "b_points=" << result.selectedIndices.size() << '\n'
               << "c_points=" << result.projected.size() << '\n'
+              << "curve_construction="
+              << (result.usedProjectionFallback ? "projection_fallback" : "surface_intersection") << '\n'
               << "trajectory_points=" << result.trajectory.size() << '\n'
               << "fitted_line_points=" << result.fittedLine.size() << '\n'
               << "white_points=" << result.whitePoints.size() << '\n';
@@ -125,9 +128,11 @@ int main(int argc, char **argv) {
     std::cout << "white_corner_points=" << cornerCount << '\n';
     std::map<std::string, int> failures;
     double maxExtrapolation = 0, maxRms = 0;
-    int curved = 0;
+    int curved = 0, intersectionFailures = 0;
     for (const auto &station : result.intersectionStations) {
-        if (!station.valid) ++failures[station.failure];
+        const auto reason = !station.intersectionFailure.empty()
+            ? station.intersectionFailure : (!station.valid ? station.failure : std::string());
+        if (!reason.empty()) { ++failures[reason]; ++intersectionFailures; }
         else {
             maxExtrapolation = std::max(maxExtrapolation, station.point.extrapolationDistance);
             maxRms = std::max(maxRms, station.point.surfaceRms);
@@ -136,7 +141,8 @@ int main(int argc, char **argv) {
     }
     std::cout << "intersection_stations=" << result.intersectionStations.size()
               << " quadratic=" << curved << " max_valid_extrapolation=" << maxExtrapolation
-              << " max_valid_rms=" << maxRms << '\n';
+              << " max_valid_rms=" << maxRms
+              << " primary_intersection_failures=" << intersectionFailures << '\n';
     for (const auto &entry : failures)
         std::cout << "intersection_failure=" << entry.first << " count=" << entry.second << '\n';
     for (std::size_t i = 0; i < result.referenceSegments.size(); ++i) {
@@ -168,13 +174,15 @@ int main(int argc, char **argv) {
         writeIndexed(directory / "b_slice.xyz", points, result.selectedIndices);
         writePoints(directory / "c_projected.xyz", result.projected);
         writePoints(directory / "c_intersection.xyz", result.projected);
+        writePoints(directory / "c_feature_curve.xyz", result.projected);
         std::ofstream stations(directory / "intersection_stations.tsv");
-        stations << "longitudinal\tvalid\treference_index\tsupport\tdegree\trms\textrapolation\tboundary_intersection_gap\treason\n";
+        stations << "longitudinal\tvalid\treference_index\tsupport\tdegree\trms\textrapolation\tboundary_intersection_gap\tis_projection_fallback\tintersection_failure\tfinal_failure\n";
         for (const auto &s : result.intersectionStations)
             stations << s.longitudinal << '\t' << s.valid << '\t' << s.point.referenceIndex
                      << '\t' << s.point.supportCount << '\t' << s.point.surfaceDegree << '\t'
                      << s.point.surfaceRms << '\t' << s.point.extrapolationDistance << '\t'
-                     << s.boundaryIntersectionGap << '\t' << s.failure << '\n';
+                     << s.boundaryIntersectionGap << '\t' << s.point.projectionFallback << '\t'
+                     << s.intersectionFailure << '\t' << s.failure << '\n';
         writePoints(directory / "trajectory.xyz", result.trajectory);
         writePoints(directory / "measured_curve.xyz", result.trajectory);
         writePoints(directory / "fitted_line.xyz", result.fittedLine);

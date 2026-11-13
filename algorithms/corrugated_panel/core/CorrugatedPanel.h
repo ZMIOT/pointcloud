@@ -36,6 +36,7 @@ struct Config {
     double surfaceFitTolerance = 0.6;
     int minSurfacePoints = 20;
     double minIntersectionAngleDegrees = 10.0;
+    bool allowProjectionFallback = true;
     int threads = 0; // 0: OpenMP runtime default
 };
 
@@ -83,15 +84,20 @@ struct ProjectedPoint {
     double surfaceRms = 0.0;
     std::uint32_t supportCount = 0;
     int surfaceDegree = 0;
+    bool projectionFallback = false;
 };
 
 struct IntersectionStation {
     double longitudinal = 0.0;
     ProjectedPoint point;
+    ProjectedPoint projectionCandidate;
     Vec3 longitudinalTangent = Vec3::Zero();
+    Vec3 projectionTangent = Vec3::Zero();
     double boundaryIntersectionGap = 0.0;
+    bool hasProjectionCandidate = false;
     bool valid = false;
     std::string failure;
+    std::string intersectionFailure;
 };
 
 struct Result {
@@ -107,9 +113,10 @@ struct Result {
     std::vector<SliceEvaluation> slices;
     int selectedSlice = -1;
     std::vector<int> selectedIndices;
-    std::vector<ProjectedPoint> projected; // Legacy member name; now surface/A intersection candidates.
+    std::vector<ProjectedPoint> projected; // Legacy member name; mode-uniform feature-curve candidates.
     std::vector<IntersectionStation> intersectionStations;
-    std::vector<ProjectedPoint> trajectory; // 求交恢复曲线，不是直接实测点
+    bool usedProjectionFallback = false; // true 时整条曲线均为 B 到 A 的投影，不与求交点混用
+    std::vector<ProjectedPoint> trajectory; // 求交恢复或全局投影回退曲线，不是直接实测点
     std::vector<ProjectedPoint> fittedLine; // 坡段整体直线拟合角点
     std::vector<ProjectedPoint> whitePoints; // 恢复曲线采样后投影到整段拟合直线
 };

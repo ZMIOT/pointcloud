@@ -117,6 +117,7 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
                                 const Hooks &hooks, Result &result) {
     result.projected.clear();
     result.intersectionStations.clear();
+    result.usedProjectionFallback = false;
     result.trajectory.clear();
     result.fittedLine.clear();
     result.whitePoints.clear();
@@ -182,11 +183,13 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         }
         anchor -= v * ((plane.normal.dot(anchor) + plane.d) / depthFactor);
         std::vector<double> seedTs, seedHs, seedSs;
+        std::vector<std::uint32_t> seedSources;
         for (auto it = beginAt(seeds, s - halfWidth); it != seeds.end() && it->first <= s + halfWidth; ++it) {
             const auto &p = points[std::size_t(it->second)].xyz;
             seedTs.push_back(u.dot(p - anchor));
             seedHs.push_back(side * (plane.normal.dot(p) + plane.d));
             seedSs.push_back(it->first-s);
+            seedSources.push_back(points[std::size_t(it->second)].source);
         }
         if (seedTs.empty()) {
             station.failure = "missing_B_seed";
@@ -202,6 +205,18 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         const double lengthSlope = varianceS > 1e-8 ? covarianceST/varianceS : 0;
         for (std::size_t i = 0; i < seedTs.size(); ++i) seedTs[i] -= lengthSlope*seedSs[i];
         const double seedT = median(seedTs), seedH = median(seedHs);
+        std::size_t seedRepresentative = 0;
+        for (std::size_t i = 1; i < seedTs.size(); ++i)
+            if (std::hypot(seedSs[i], seedTs[i]-seedT) <
+                std::hypot(seedSs[seedRepresentative], seedTs[seedRepresentative]-seedT))
+                seedRepresentative = i;
+        station.projectionCandidate.xyz = anchor + u*seedT;
+        station.projectionCandidate.source = seedSources[seedRepresentative];
+        station.projectionCandidate.referenceIndex = std::uint32_t(ai);
+        station.projectionCandidate.supportCount = std::uint32_t(seedTs.size());
+        station.projectionCandidate.projectionFallback = true;
+        station.projectionTangent = l-v*(plane.normal.dot(l)/depthFactor) + u*lengthSlope;
+        station.hasProjectionCandidate = true;
         const auto transverseAtStation = [&](const Sample &p) { return p.t-lengthSlope*p.s; };
         std::map<int, std::vector<Sample>> layers;
         for (auto it = beginAt(ordered, s - halfWidth); it != ordered.end() && it->first <= s + halfWidth; ++it) {
@@ -309,17 +324,47 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         result.intersectionStations.push_back(station);
         if (station.valid) result.projected.push_back(station.point);
     }
-    // Never connect across failed stations. Keep their evidence for UI/inspection.
-    for (const auto &station : result.intersectionStations)
-        if (!station.valid) {
-            result.message = "表面求交失败，长度坐标 " + std::to_string(station.longitudinal) +
-                "：" + failureLabel(station.failure) + "（" + station.failure + "），支持点=" +
-                std::to_string(station.point.supportCount) + "，残差=" +
-                std::to_string(station.point.surfaceRms) + "，外推弧长=" +
-                std::to_string(station.point.extrapolationDistance) +
-                "。保留检查点，未生成跨缺口轨迹。";
+    // Intersection and projection are different geometric meanings. If any station
+    // cannot be intersected, either reject the run or switch every station to the
+    // same projection mode; never mix both modes in one trajectory.
+    const auto firstFailure = std::find_if(result.intersectionStations.begin(),
+        result.intersectionStations.end(), [](const IntersectionStation &station) {
+            return !station.valid;
+        });
+    if (firstFailure != result.intersectionStations.end()) {
+        const bool projectionAvailable = std::all_of(result.intersectionStations.begin(),
+            result.intersectionStations.end(), [](const IntersectionStation &station) {
+                return station.hasProjectionCandidate;
+            });
+        if (config.allowProjectionFallback && projectionAvailable) {
+            result.usedProjectionFallback = true;
+            result.projected.clear();
+            result.projected.reserve(result.intersectionStations.size());
+            for (auto &station : result.intersectionStations) {
+                if (!station.valid) station.intersectionFailure = station.failure;
+                station.point.xyz = station.projectionCandidate.xyz;
+                station.point.source = station.projectionCandidate.source;
+                station.point.referenceIndex = station.projectionCandidate.referenceIndex;
+                station.point.projectionFallback = true;
+                station.point.extrapolated = false;
+                station.point.extrapolationDistance = 0.0;
+                station.longitudinalTangent = station.projectionTangent;
+                station.valid = true;
+                station.failure.clear();
+                result.projected.push_back(station.point);
+            }
+        } else {
+            result.message = "表面求交失败，长度坐标 " + std::to_string(firstFailure->longitudinal) +
+                "：" + failureLabel(firstFailure->failure) + "（" + firstFailure->failure +
+                "），支持点=" + std::to_string(firstFailure->point.supportCount) + "，残差=" +
+                std::to_string(firstFailure->point.surfaceRms) + "，外推弧长=" +
+                std::to_string(firstFailure->point.extrapolationDistance) +
+                (config.allowProjectionFallback
+                    ? "。该站位也没有完整 B 投影证据，未生成轨迹。"
+                    : "。投影回退已关闭，未生成轨迹。保留检查点供复核。");
             return false;
         }
+    }
     for (std::size_t i = 1; i < result.projected.size(); ++i)
         if (result.projected[i-1].referenceIndex != result.projected[i].referenceIndex) {
             const auto ai = result.projected[i].referenceIndex;
@@ -335,7 +380,7 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
                 right.valid = false;
                 right.failure = "reference_boundary_intersection_gap";
                 result.projected.erase(result.projected.begin()+i);
-                result.message = "相邻 A 面边界不连续，表面交线不能跨区段强行连接。";
+                result.message = "相邻 A 面边界不连续，特征曲线不能跨区段强行连接。";
                 return false;
             }
         }

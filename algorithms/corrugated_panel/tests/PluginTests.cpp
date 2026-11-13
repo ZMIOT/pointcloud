@@ -70,13 +70,14 @@ int main(int argc, char **argv) {
         const auto schema = plugin->parameterSchema();
         require(fw::Parameters::validateSchema(schema).isEmpty(), "invalid parameter schema");
         const auto parameters = fw::Parameters::defaults(schema);
-        require(schema.value("parameterVersion").toInt() == 3 &&
-                    plugin->descriptor().version == "1.6.0", "plugin version mismatch");
+        require(schema.value("parameterVersion").toInt() == 4 &&
+                    plugin->descriptor().version == "1.6.1", "plugin version mismatch");
         fw::ParameterSet old{{"trajectory_spacing", 3.0}}, migrated;
         QString migrationError;
-        require(plugin->migrateParameters(2, old, migrated, migrationError) &&
+        require(plugin->migrateParameters(3, old, migrated, migrationError) &&
                     migrated.value("trajectory_spacing").toDouble() == 3.0 &&
-                    migrated.value("max_surface_extrapolation").toDouble() == 5.0,
+                    migrated.value("max_surface_extrapolation").toDouble() == 5.0 &&
+                    migrated.value("allow_projection_fallback").toBool(),
                 "parameter migration must preserve old settings and add defaults");
         require(!plugin->migrateParameters(99, old, migrated, migrationError),
                 "unknown parameter version must not migrate");
@@ -119,8 +120,8 @@ int main(int argc, char **argv) {
                 "A/B/C/measured-curve/fitted-line/white-point outputs are required");
         require(result.outputs[0].name == QStringLiteral("A 基准面"), "A output missing");
         require(result.outputs[1].name == QStringLiteral("B 最佳切片"), "B output missing");
-        require(result.outputs[2].name == QStringLiteral("C 表面交线候选点"), "C output missing");
-        require(result.outputs[3].name == QStringLiteral("求交恢复曲线"),
+        require(result.outputs[2].name == QStringLiteral("C 特征曲线候选点"), "C output missing");
+        require(result.outputs[3].name == QStringLiteral("特征曲线（求交/投影）"),
                 "measured curve output missing");
         require(result.outputs[4].name == QStringLiteral("拟合直线控制点"),
                 "fitted line output missing");
@@ -130,7 +131,8 @@ int main(int argc, char **argv) {
                 "C metadata missing");
         for (int i = 2; i < 6; ++i)
             require(fw::hasFields(result.outputs[i], {"reference_index", "is_extrapolated",
-                        "extrapolation_distance", "surface_rms", "support_count", "surface_degree"}),
+                        "extrapolation_distance", "surface_rms", "support_count", "surface_degree",
+                        "is_projection_fallback"}),
                     "surface provenance missing");
         const auto intersection = result.metrics.value("surface_intersection").toObject();
         require(intersection.value("stations").toInt() > 0 &&
@@ -147,7 +149,7 @@ int main(int argc, char **argv) {
                 "measured curve and fitted line must remain separate outputs");
         const auto measuredLayer = std::find_if(
             result.layers.cbegin(), result.layers.cend(), [](const fw::DebugLayer &layer) {
-                return layer.name == QStringLiteral("求交恢复曲线") &&
+                return layer.name == QStringLiteral("特征曲线（求交/投影）") &&
                        layer.geometry.kind == fw::GeometryKind::Polyline;
             });
         const auto fittedLayer = std::find_if(
@@ -174,19 +176,30 @@ int main(int argc, char **argv) {
         require(normal.checkpoints == 0, "debug-disabled execution emitted checkpoints");
         auto noExtrapolation = parameters;
         noExtrapolation["max_surface_extrapolation"] = 0.0;
+        noExtrapolation["allow_projection_fallback"] = false;
         Context failureContext;
         const auto unsupported = algorithm->execute(input, noExtrapolation, failureContext);
         require(unsupported.status == fw::ResultStatus::Failed && unsupported.outputs.empty() &&
                     unsupported.metrics.value("surface_intersection").toObject()
                         .value("failure_counts").toObject().contains("surface_extrapolation_limit"),
                 "unsupported recovery must expose failure evidence without formal trajectory outputs");
+        auto fallbackParameters = parameters;
+        fallbackParameters["max_surface_extrapolation"] = 0.0;
+        Context fallbackContext;
+        const auto fallbackResult = algorithm->execute(input, fallbackParameters, fallbackContext);
+        require(fallbackResult.status == fw::ResultStatus::Success &&
+                    fallbackResult.metrics.value("surface_intersection").toObject()
+                        .value("used_projection_fallback").toBool(),
+                "enabled fallback must switch the entire curve to projection mode");
 
         // 同一真实样本还需经过插件的 float 点云转换，避免仅验证 double 核心。
-        for (const char *sampleVariable : {"BWB_SAMPLE_6_PATH", "BWB_SAMPLE_52_PATH"}) {
+        for (const char *sampleVariable : {"BWB_SAMPLE_6_PATH", "BWB_SAMPLE_52_PATH",
+                                           "BWB_SAMPLE_1_PATH"}) {
             const char *samplePath = std::getenv(sampleVariable);
             if (!samplePath || !*samplePath)
                 continue;
             const bool sample52 = std::string(sampleVariable) == "BWB_SAMPLE_52_PATH";
+            const bool sample1 = std::string(sampleVariable) == "BWB_SAMPLE_1_PATH";
             std::ifstream file(std::filesystem::u8path(samplePath));
             require(bool(file), "cannot open sample6 for plugin regression");
             std::string header;
@@ -196,10 +209,13 @@ int main(int argc, char **argv) {
             double x = 0, y = 0, z = 0;
             while (file >> index >> x >> y >> z)
                 realCloud.push_back({float(x), float(y), float(z)});
-            require(file.eof() && realCloud.size() == (sample52 ? 831069u : 1309174u),
+            require(file.eof() && realCloud.size() ==
+                        (sample1 ? 1448522u : (sample52 ? 831069u : 1309174u)),
                     "wrong sample6 fixture for plugin regression");
-            auto realData = fw::DebugLayer::result(sample52 ? "52.txt" : "6.txt", realCloud).data;
-            realData.id = sample52 ? "sample52-regression" : "sample6-regression";
+            const char *sampleName = sample1 ? "1.txt" : (sample52 ? "52.txt" : "6.txt");
+            auto realData = fw::DebugLayer::result(sampleName, realCloud).data;
+            realData.id = sample1 ? "sample1-regression" :
+                (sample52 ? "sample52-regression" : "sample6-regression");
             realData.coordinateFrame = "world";
             realData.unit = "mm";
             Context realContext;
@@ -207,7 +223,16 @@ int main(int argc, char **argv) {
             require(realResult.status == fw::ResultStatus::Success,
                     realResult.message.toStdString());
             const auto segments = realResult.metrics.value("reference_segments").toArray();
-            require(segments.size() == 2, "plugin sample6 must have two A planes");
+            if (sample1) {
+                const auto surface = realResult.metrics.value("surface_intersection").toObject();
+                require(segments.size() == 1 && surface.value("used_projection_fallback").toBool() &&
+                            surface.value("projection_fallback_stations").toInt() > 0,
+                        "plugin sample1 did not use the declared whole-curve fallback");
+                std::cout << "1.txt plugin regression: projection fallback stations="
+                          << surface.value("projection_fallback_stations").toInt() << '\n';
+                continue;
+            }
+            require(segments.size() == 2, "plugin sample must have two A planes");
             for (const auto &entry : segments) {
                 const auto segment = entry.toObject();
                 require(segment.value("point_count").toInt() > 78000 &&
@@ -219,7 +244,7 @@ int main(int argc, char **argv) {
                         second.value("boundary_gap_measured").toBool() &&
                         second.value("boundary_gap_from_previous").toDouble(10.0) < 0.6,
                     "plugin conversion caused sample6 A continuity regression");
-            std::cout << (sample52 ? "52.txt" : "6.txt") << " plugin regression: A1="
+            std::cout << sampleName << " plugin regression: A1="
                       << segments.at(0).toObject().value("point_count").toInt()
                       << " A2=" << second.value("point_count").toInt()
                       << " gap=" << second.value("boundary_gap_from_previous").toDouble()

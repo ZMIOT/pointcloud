@@ -60,6 +60,7 @@ void analytic(double slope, double curvature, const Eigen::Matrix3d &r,
     std::cout << label << " max_analytic_error=" << error << '\n';
 }
 void rejected(Fixture f, const std::string &reason, bwb::Config config = {}) {
+    config.allowProjectionFallback = false;
     require(!bwb::recoverSurfaceIntersection(f.points, config, {}, f.result), "unsafe case accepted: "+reason);
     require(f.result.message.find(reason) != std::string::npos, f.result.message);
     require(f.result.trajectory.empty(), "failed surface must not produce trajectory");
@@ -78,9 +79,28 @@ int main() {
         }
         rejected(fixture(0,0,6), "surface_extrapolation_limit");
         rejected(fixture(1,0,4), "surface_extrapolation_limit"); // arc > 5 although height < 5
+        auto fallback = fixture(0.4,0,6);
+        require(bwb::recoverSurfaceIntersection(fallback.points, {}, {}, fallback.result),
+                "whole-curve projection fallback must recover unsupported intersection stations");
+        require(fallback.result.usedProjectionFallback &&
+                    std::all_of(fallback.result.projected.begin(), fallback.result.projected.end(),
+                        [](const bwb::ProjectedPoint &p) { return p.projectionFallback; }),
+                "fallback must switch every station to one projection mode");
+        require(std::any_of(fallback.result.intersectionStations.begin(),
+                            fallback.result.intersectionStations.end(),
+                        [](const bwb::IntersectionStation &s) {
+                            return s.intersectionFailure == "surface_extrapolation_limit";
+                        }), "fallback lost the primary intersection failure evidence");
+        for (const auto &p : fallback.result.projected) {
+            require(std::abs(p.xyz.z()) < 1e-9, "fallback point is not on A");
+            require(std::abs(p.xyz.y() - 0.1*p.xyz.x()) > 2.0,
+                    "projection fallback was mislabeled as the analytic intersection");
+        }
         auto onLimit = fixture(0,0,5);
         require(bwb::recoverSurfaceIntersection(onLimit.points, {}, {}, onLimit.result),
                 "exactly 5 mm supported extrapolation must be accepted");
+        require(!onLimit.result.usedProjectionFallback,
+                "a supported intersection must not use projection fallback");
         rejected(fixture(0,0,1,true), "missing_B_seed");
         auto tangent = fixture(6,0);
         rejected(std::move(tangent), "near_tangent_intersection");

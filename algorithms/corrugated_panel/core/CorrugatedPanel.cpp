@@ -1341,7 +1341,7 @@ Result extract(const std::vector<Point> &points, const Config &config, const Hoo
     if (!intersected) return result;
     result.trajectory = resampleIntersection(result.projected, config.trajectorySpacing);
     if (result.trajectory.size() < 2) {
-        result.message = "表面交线已找到，但无法生成连续均匀轨迹。";
+        result.message = "特征曲线候选已生成，但无法生成连续均匀轨迹。";
         return result;
     }
     const auto fitted = fitPolyline(result.trajectory, config.lineFitTolerance);
@@ -1353,7 +1353,9 @@ Result extract(const std::vector<Point> &points, const Config &config, const Hoo
         return result;
     }
     result.ok = true;
-    result.message = "已恢复原始表面与基准面的交线，并完成整段直线拟合和白点采样。";
+    result.message = result.usedProjectionFallback
+        ? "局部表面无法在全部站位稳定求交，已按启用的回退策略将整条 B 特征曲线投影到对应基准面；该结果不是表面交线。"
+        : "已恢复原始表面与基准面的交线，并完成整段直线拟合和白点采样。";
     if (!stage(hooks, 4, result)) {
         result.ok = false;
         result.cancelled = true;
