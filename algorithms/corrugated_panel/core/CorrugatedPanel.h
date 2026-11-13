@@ -32,7 +32,7 @@ struct Config {
     double trajectorySpacing = 2.0;
     double lineFitTolerance = 3.0;
     double whitePointSpacing = 10.0;
-    double maxSurfaceExtrapolation = 5.0;
+    double maxSurfaceExtrapolation = 40.0; // Intentional extension from the off-edge body band.
     double surfaceFitTolerance = 0.6;
     int minSurfacePoints = 20;
     double minIntersectionAngleDegrees = 10.0;
@@ -94,6 +94,9 @@ struct IntersectionStation {
     Vec3 longitudinalTangent = Vec3::Zero();
     Vec3 projectionTangent = Vec3::Zero();
     double boundaryIntersectionGap = 0.0;
+    double supportMinHeight = 0.0;
+    double supportMaxHeight = 0.0;
+    double attemptedExtrapolation = 0.0;
     bool hasProjectionCandidate = false;
     bool valid = false;
     std::string failure;
@@ -116,6 +119,8 @@ struct Result {
     std::vector<ProjectedPoint> projected; // Legacy member name; mode-uniform feature-curve candidates.
     std::vector<IntersectionStation> intersectionStations;
     bool usedProjectionFallback = false; // true 时整条曲线均为 B 到 A 的投影，不与求交点混用
+    double bodyBandMin = 0.0;
+    double bodyBandMax = 0.0;
     std::vector<ProjectedPoint> trajectory; // 求交恢复或全局投影回退曲线，不是直接实测点
     std::vector<ProjectedPoint> fittedLine; // 坡段整体直线拟合角点
     std::vector<ProjectedPoint> whitePoints; // 恢复曲线采样后投影到整段拟合直线

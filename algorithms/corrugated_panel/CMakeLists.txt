@@ -32,8 +32,8 @@ endif()
 framework_add_plugin(CorrugatedPanelAlgorithm TYPE algorithm
   ID custom.corrugatedPanelFeature
   ALGORITHM_ID custom.corrugatedPanelFeature
-  VERSION 1.6.1
-  PARAMETER_VERSION 4
+  VERSION 1.7.0
+  PARAMETER_VERSION 5
   SOURCES MyAlgorithm.cpp parameters.qrc)
 target_link_libraries(CorrugatedPanelAlgorithm PRIVATE CorrugatedPanelCore)
 
@@ -56,6 +56,8 @@ if(BUILD_TESTING)
   set_tests_properties(corrugated_panel_sample52 PROPERTIES SKIP_RETURN_CODE 77)
   add_test(NAME corrugated_panel_sample1 COMMAND CorrugatedPanelRealSampleTests 1)
   set_tests_properties(corrugated_panel_sample1 PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(NAME corrugated_panel_sample3 COMMAND CorrugatedPanelRealSampleTests 3)
+  set_tests_properties(corrugated_panel_sample3 PROPERTIES SKIP_RETURN_CODE 77)
   add_test(NAME corrugated_panel_sample121_fallback COMMAND CorrugatedPanelRealSampleTests 121)
   set_tests_properties(corrugated_panel_sample121_fallback PROPERTIES SKIP_RETURN_CODE 77)
   add_executable(CorrugatedPanelPluginTests tests/PluginTests.cpp)

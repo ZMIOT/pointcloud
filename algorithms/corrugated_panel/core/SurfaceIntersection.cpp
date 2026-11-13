@@ -132,7 +132,14 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
     const int side = result.slices[std::size_t(result.selectedSlice)].side;
     const double spacing = config.trajectorySpacing;
     const double heightStep = std::max(config.sliceThickness * 2.0 / 3.0, config.planeDistance * 2.0);
-    const double floor = config.planeDistance * 1.5; // Do not fit the A face as the source surface.
+    // The offset slices deliberately avoid the welded edge. Never walk back
+    // into that edge to fit the surface: extend the unwelded body model instead.
+    const auto offsets = std::minmax_element(config.sliceOffsets.begin(), config.sliceOffsets.end());
+    const double floor = std::max(*offsets.first - config.sliceThickness * 0.5,
+                                  config.planeDistance * 1.5);
+    const double ceiling = *offsets.second + config.sliceThickness * 0.5;
+    result.bodyBandMin = floor;
+    result.bodyBandMax = ceiling;
     const double maxSlope = 1.0 / std::tan(config.minIntersectionAngleDegrees * pi / 180.0);
     std::vector<std::pair<double, int>> ordered, seeds;
     ordered.reserve(points.size());
@@ -186,8 +193,10 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         std::vector<std::uint32_t> seedSources;
         for (auto it = beginAt(seeds, s - halfWidth); it != seeds.end() && it->first <= s + halfWidth; ++it) {
             const auto &p = points[std::size_t(it->second)].xyz;
+            const double h = side * (plane.normal.dot(p) + plane.d);
+            if (h < floor - 1e-8 || h > ceiling + 1e-8) continue;
             seedTs.push_back(u.dot(p - anchor));
-            seedHs.push_back(side * (plane.normal.dot(p) + plane.d));
+            seedHs.push_back(h);
             seedSs.push_back(it->first-s);
             seedSources.push_back(points[std::size_t(it->second)].source);
         }
@@ -222,7 +231,7 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         for (auto it = beginAt(ordered, s - halfWidth); it != ordered.end() && it->first <= s + halfWidth; ++it) {
             const auto &p = points[std::size_t(it->second)];
             const double h = side * (plane.normal.dot(p.xyz) + plane.d);
-            if (h <= floor || h > seedH + config.sliceThickness * 2.0) continue;
+            if (h < floor - 1e-8 || h > ceiling + 1e-8) continue;
             const int layer = int(std::floor(h / heightStep));
             layers[layer].push_back({h, u.dot(p.xyz - anchor), it->first - s, p.source, layer});
         }
@@ -263,7 +272,7 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         support.insert(support.end(), central.begin(), central.end());
         for (int direction : {-1, 1}) {
             double previousH = seedH, previousT = seedT, slope = 0.0;
-            for (int step = 1; step <= int(std::ceil((seedH + config.sliceThickness * 2.0) / heightStep)) + 1; ++step) {
+            for (int step = 1; step <= int(std::ceil((ceiling - floor) / heightStep)) + 2; ++step) {
                 const int layer = seedLayer + direction * step;
                 if (layer < 0) break;
                 const double targetH = (layer + 0.5) * heightStep;
@@ -283,11 +292,11 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
             result.intersectionStations.push_back(station); continue;
         }
         const double minH = std::min_element(support.begin(), support.end(), [](const Sample &a, const Sample &b) { return a.h < b.h; })->h;
-        const double window = std::max(config.sliceThickness * 3.0, heightStep * 6.0);
-        support.erase(std::remove_if(support.begin(), support.end(), [&](const Sample &p) { return p.h > minH + window; }), support.end());
         std::map<int, int> occupied;
         double maxH = minH;
         for (const auto &p : support) { ++occupied[p.layer]; maxH = std::max(maxH, p.h); }
+        station.supportMinHeight = minH;
+        station.supportMaxHeight = maxH;
         station.point.supportCount = std::uint32_t(support.size());
         if (occupied.size() < 3 || support.size() < std::size_t(config.minSurfacePoints)) {
             station.failure = "insufficient_height_span";
@@ -310,6 +319,7 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         const double observedSpan = arcLength(model, minH, maxH, depthFactor);
         station.point.extrapolated = minH > 1e-8;
         station.point.extrapolationDistance = extrapolation;
+        station.attemptedExtrapolation = extrapolation;
         if (station.failure.empty() && (extrapolation > config.maxSurfaceExtrapolation + 1e-8 ||
                                        extrapolation > observedSpan + 1e-8)) station.failure = "surface_extrapolation_limit";
         station.point.xyz = anchor + u * model.value(0.0);

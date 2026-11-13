@@ -70,15 +70,19 @@ int main(int argc, char **argv) {
         const auto schema = plugin->parameterSchema();
         require(fw::Parameters::validateSchema(schema).isEmpty(), "invalid parameter schema");
         const auto parameters = fw::Parameters::defaults(schema);
-        require(schema.value("parameterVersion").toInt() == 4 &&
-                    plugin->descriptor().version == "1.6.1", "plugin version mismatch");
+        require(schema.value("parameterVersion").toInt() == 5 &&
+                    plugin->descriptor().version == "1.7.0", "plugin version mismatch");
         fw::ParameterSet old{{"trajectory_spacing", 3.0}}, migrated;
         QString migrationError;
         require(plugin->migrateParameters(3, old, migrated, migrationError) &&
                     migrated.value("trajectory_spacing").toDouble() == 3.0 &&
-                    migrated.value("max_surface_extrapolation").toDouble() == 5.0 &&
+                    migrated.value("max_surface_extrapolation").toDouble() == 40.0 &&
                     migrated.value("allow_projection_fallback").toBool(),
                 "parameter migration must preserve old settings and add defaults");
+        old["max_surface_extrapolation"] = 5.0;
+        require(plugin->migrateParameters(4, old, migrated, migrationError) &&
+                    migrated.value("max_surface_extrapolation").toDouble() == 5.0,
+                "explicit user extension limit must survive migration");
         require(!plugin->migrateParameters(99, old, migrated, migrationError),
                 "unknown parameter version must not migrate");
         require(fw::Parameters::validate(schema, parameters).isEmpty(),
@@ -135,6 +139,11 @@ int main(int argc, char **argv) {
                         "is_projection_fallback"}),
                     "surface provenance missing");
         const auto intersection = result.metrics.value("surface_intersection").toObject();
+        require(intersection.value("support_region").toString() ==
+                    "offset_slice_body_band_excluding_edge" &&
+                    intersection.value("body_band_min").toDouble() == 8.5 &&
+                    intersection.value("body_band_max").toDouble() == 31.5,
+                "plugin must expose the edge-excluding body support policy");
         require(intersection.value("stations").toInt() > 0 &&
                     intersection.value("stations") == intersection.value("valid_stations"),
                 "intersection station metrics missing");
@@ -194,12 +203,13 @@ int main(int argc, char **argv) {
 
         // 同一真实样本还需经过插件的 float 点云转换，避免仅验证 double 核心。
         for (const char *sampleVariable : {"BWB_SAMPLE_6_PATH", "BWB_SAMPLE_52_PATH",
-                                           "BWB_SAMPLE_1_PATH"}) {
+                                           "BWB_SAMPLE_1_PATH", "BWB_SAMPLE_3_PATH"}) {
             const char *samplePath = std::getenv(sampleVariable);
             if (!samplePath || !*samplePath)
                 continue;
             const bool sample52 = std::string(sampleVariable) == "BWB_SAMPLE_52_PATH";
             const bool sample1 = std::string(sampleVariable) == "BWB_SAMPLE_1_PATH";
+            const bool sample3 = std::string(sampleVariable) == "BWB_SAMPLE_3_PATH";
             std::ifstream file(std::filesystem::u8path(samplePath));
             require(bool(file), "cannot open sample6 for plugin regression");
             std::string header;
@@ -210,12 +220,12 @@ int main(int argc, char **argv) {
             while (file >> index >> x >> y >> z)
                 realCloud.push_back({float(x), float(y), float(z)});
             require(file.eof() && realCloud.size() ==
-                        (sample1 ? 1448522u : (sample52 ? 831069u : 1309174u)),
+                        (sample1 ? 1448522u : (sample52 ? 831069u : (sample3 ? 1100339u : 1309174u))),
                     "wrong sample6 fixture for plugin regression");
-            const char *sampleName = sample1 ? "1.txt" : (sample52 ? "52.txt" : "6.txt");
+            const char *sampleName = sample1 ? "1.txt" : (sample52 ? "52.txt" : (sample3 ? "3.txt" : "6.txt"));
             auto realData = fw::DebugLayer::result(sampleName, realCloud).data;
             realData.id = sample1 ? "sample1-regression" :
-                (sample52 ? "sample52-regression" : "sample6-regression");
+                (sample52 ? "sample52-regression" : (sample3 ? "sample3-regression" : "sample6-regression"));
             realData.coordinateFrame = "world";
             realData.unit = "mm";
             Context realContext;
@@ -225,11 +235,11 @@ int main(int argc, char **argv) {
             const auto segments = realResult.metrics.value("reference_segments").toArray();
             if (sample1) {
                 const auto surface = realResult.metrics.value("surface_intersection").toObject();
-                require(segments.size() == 1 && surface.value("used_projection_fallback").toBool() &&
-                            surface.value("projection_fallback_stations").toInt() > 0,
-                        "plugin sample1 did not use the declared whole-curve fallback");
-                std::cout << "1.txt plugin regression: projection fallback stations="
-                          << surface.value("projection_fallback_stations").toInt() << '\n';
+                require(segments.size() == 1 && !surface.value("used_projection_fallback").toBool() &&
+                            surface.value("intersection_valid_stations").toInt() == 194,
+                        "plugin sample1 did not recover from body evidence");
+                std::cout << "1.txt plugin regression: body-extension stations="
+                          << surface.value("intersection_valid_stations").toInt() << '\n';
                 continue;
             }
             require(segments.size() == 2, "plugin sample must have two A planes");

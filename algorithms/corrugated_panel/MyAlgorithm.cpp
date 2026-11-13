@@ -43,7 +43,7 @@ bwb::Config configuration(const fw::ParameterSet &parameters) {
     config.trajectorySpacing = parameters["trajectory_spacing"].toDouble(2.0);
     config.lineFitTolerance = parameters["line_fit_tolerance"].toDouble(3.0);
     config.whitePointSpacing = parameters["white_point_spacing"].toDouble(10.0);
-    config.maxSurfaceExtrapolation = parameters["max_surface_extrapolation"].toDouble(5.0);
+    config.maxSurfaceExtrapolation = parameters["max_surface_extrapolation"].toDouble(40.0);
     config.surfaceFitTolerance = parameters["surface_fit_tolerance"].toDouble(0.6);
     config.minSurfacePoints = parameters["min_surface_points"].toInt(20);
     config.minIntersectionAngleDegrees = parameters["min_intersection_angle"].toDouble(10.0);
@@ -144,7 +144,7 @@ QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
             ++intersectionValidStations;
             quadraticStations += station.point.surfaceDegree == 2 ? 1 : 0;
             maxRms = std::max(maxRms, station.point.surfaceRms);
-            maxExtrapolation = std::max(maxExtrapolation, station.point.extrapolationDistance);
+            maxExtrapolation = std::max(maxExtrapolation, station.attemptedExtrapolation);
         } else {
             ++attemptedFailures;
             const QString reason = QString::fromStdString(attemptFailure);
@@ -154,7 +154,9 @@ QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
                     {"reference_index", int(station.point.referenceIndex)}, {"reason", reason},
                     {"surface_rms", station.point.surfaceRms},
                     {"support_count", int(station.point.supportCount)},
-                    {"extrapolation_distance", station.point.extrapolationDistance}});
+                    {"support_min_height", station.supportMinHeight},
+                    {"support_max_height", station.supportMaxHeight},
+                    {"extrapolation_distance", station.attemptedExtrapolation}});
         }
     }
     QJsonArray coefficients{result.reference.normal.x(), result.reference.normal.y(),
@@ -209,10 +211,13 @@ QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
             {"surface_intersection", QJsonObject{
                 {"method", result.usedProjectionFallback
                     ? "whole_curve_B_to_A_projection_fallback"
-                    : "connected_surface_local_section_fit"},
+                    : "off_edge_body_surface_extension"},
                 {"point_provenance", result.usedProjectionFallback
                     ? "projected_fallback_not_surface_intersection"
-                    : "restored_intersection_not_direct_measurement"},
+                    : "nominal_body_extension_not_measured_edge"},
+                {"support_region", "offset_slice_body_band_excluding_edge"},
+                {"body_band_min", result.bodyBandMin},
+                {"body_band_max", result.bodyBandMax},
                 {"used_projection_fallback", result.usedProjectionFallback},
                 {"stations", int(result.intersectionStations.size())},
                 {"valid_stations", validStations},
@@ -418,7 +423,7 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
         output.outputs = {plane, selected, projected, measuredCurve, fittedLine, whitePoints};
         output.message = extracted.usedProjectionFallback
             ? QStringLiteral("表面求交未覆盖全部站位，已将整条 B 特征曲线投影到对应 A 面；输出明确标记为投影回退，不代表 S 与 A 的交线。")
-            : QStringLiteral("已沿原始表面恢复与基准面的交线；白点由恢复曲线采样并投到整段拟合直线，不是直接实测交点。");
+            : QStringLiteral("已使用远离边缘的板材主体拟合并延伸到基准面；边缘区域未参与特征曲线拟合。白点由该曲线规则化生成。");
         output.metrics = resultMetrics(extracted, elapsed);
         auto background = fw::DebugLayer::background(QStringLiteral("原始点云"), sourceCloud);
         background.style.opacity = 0.2;
@@ -461,14 +466,14 @@ class CorrugatedPanelPlugin final : public QObject, public fw::IAlgorithmPlugin 
     fw::AlgorithmDescriptor descriptor() const override {
         return {"custom.corrugatedPanelFeature",
                 QStringLiteral("波纹板特征提取：竖直放置"),
-                "1.6.1",
+                "1.7.0",
                 {"x", "y", "z"}};
     }
     QJsonObject parameterSchema() const override { return schema(); }
     bool migrateParameters(int fromVersion, const fw::ParameterSet &old,
                            fw::ParameterSet &updated, QString &error) const override {
-        if (fromVersion != 1 && fromVersion != 2 && fromVersion != 3) {
-            error = QStringLiteral("只支持从参数版本 1、2 或 3 迁移。");
+        if (fromVersion < 1 || fromVersion > 4) {
+            error = QStringLiteral("只支持从参数版本 1、2、3 或 4 迁移。");
             return false;
         }
         updated = fw::Parameters::merge(schema(), old);

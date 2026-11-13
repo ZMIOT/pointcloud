@@ -1355,7 +1355,7 @@ Result extract(const std::vector<Point> &points, const Config &config, const Hoo
     result.ok = true;
     result.message = result.usedProjectionFallback
         ? "局部表面无法在全部站位稳定求交，已按启用的回退策略将整条 B 特征曲线投影到对应基准面；该结果不是表面交线。"
-        : "已恢复原始表面与基准面的交线，并完成整段直线拟合和白点采样。";
+        : "已由远离边缘的板材主体模型延伸到基准面，完成整段直线拟合和白点采样；边缘区域未参与特征曲线拟合。";
     if (!stage(hooks, 4, result)) {
         result.ok = false;
         result.cancelled = true;

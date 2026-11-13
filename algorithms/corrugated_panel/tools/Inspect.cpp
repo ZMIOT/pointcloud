@@ -118,7 +118,8 @@ int main(int argc, char **argv) {
               << "b_points=" << result.selectedIndices.size() << '\n'
               << "c_points=" << result.projected.size() << '\n'
               << "curve_construction="
-              << (result.usedProjectionFallback ? "projection_fallback" : "surface_intersection") << '\n'
+              << (result.usedProjectionFallback ? "projection_fallback" : "off_edge_body_extension") << '\n'
+              << "body_support_band=" << result.bodyBandMin << ':' << result.bodyBandMax << '\n'
               << "trajectory_points=" << result.trajectory.size() << '\n'
               << "fitted_line_points=" << result.fittedLine.size() << '\n'
               << "white_points=" << result.whitePoints.size() << '\n';
@@ -134,7 +135,7 @@ int main(int argc, char **argv) {
             ? station.intersectionFailure : (!station.valid ? station.failure : std::string());
         if (!reason.empty()) { ++failures[reason]; ++intersectionFailures; }
         else {
-            maxExtrapolation = std::max(maxExtrapolation, station.point.extrapolationDistance);
+            maxExtrapolation = std::max(maxExtrapolation, station.attemptedExtrapolation);
             maxRms = std::max(maxRms, station.point.surfaceRms);
             curved += station.point.surfaceDegree == 2 ? 1 : 0;
         }
@@ -176,13 +177,15 @@ int main(int argc, char **argv) {
         writePoints(directory / "c_intersection.xyz", result.projected);
         writePoints(directory / "c_feature_curve.xyz", result.projected);
         std::ofstream stations(directory / "intersection_stations.tsv");
-        stations << "longitudinal\tvalid\treference_index\tsupport\tdegree\trms\textrapolation\tboundary_intersection_gap\tis_projection_fallback\tintersection_failure\tfinal_failure\n";
+        stations << "longitudinal\tvalid\treference_index\tsupport\tdegree\trms\textrapolation\tboundary_intersection_gap\tis_projection_fallback\tintersection_failure\tfinal_failure\tsupport_min_height\tsupport_max_height\tattempted_extrapolation\n";
         for (const auto &s : result.intersectionStations)
             stations << s.longitudinal << '\t' << s.valid << '\t' << s.point.referenceIndex
                      << '\t' << s.point.supportCount << '\t' << s.point.surfaceDegree << '\t'
                      << s.point.surfaceRms << '\t' << s.point.extrapolationDistance << '\t'
                      << s.boundaryIntersectionGap << '\t' << s.point.projectionFallback << '\t'
-                     << s.intersectionFailure << '\t' << s.failure << '\n';
+                     << s.intersectionFailure << '\t' << s.failure << '\t'
+                     << s.supportMinHeight << '\t' << s.supportMaxHeight << '\t'
+                     << s.attemptedExtrapolation << '\n';
         writePoints(directory / "trajectory.xyz", result.trajectory);
         writePoints(directory / "measured_curve.xyz", result.trajectory);
         writePoints(directory / "fitted_line.xyz", result.fittedLine);

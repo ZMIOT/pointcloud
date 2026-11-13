@@ -31,7 +31,7 @@ Fixture fixture(double slope, double curvature, double start = 1.0, bool gap = f
     for (int ix = -100; ix <= 100; ++ix) {
         const double x = ix * 0.5;
         if (gap && std::abs(x) < 4) continue;
-        for (double h = start; h <= 20.0; h += 0.25) {
+        for (double h = start; h <= 35.0; h += 0.25) {
             const auto index = std::uint32_t(f.points.size());
             f.points.push_back({{x, 0.1*x + slope*h + curvature*h*h, h}, index});
             if (std::abs(h-10) <= 1.5) f.result.selectedIndices.push_back(int(index));
@@ -53,7 +53,8 @@ void analytic(double slope, double curvature, const Eigen::Matrix3d &r,
     for (const auto &p : f.result.projected) {
         const auto original = (r.transpose()*(p.xyz-translation)).eval();
         error = std::max(error, std::hypot(original.y()-0.1*original.x(), original.z()));
-        require(p.supportCount >= 20 && p.extrapolationDistance <= 5, "missing support provenance");
+        require(!p.projectionFallback && p.supportCount >= 20 && p.extrapolationDistance <= 40,
+                "missing body-extension provenance");
         if (curvature != 0) require(p.surfaceDegree == 2, "quadratic surface was not selected");
     }
     require(error < 1e-5, label+": intersection error="+std::to_string(error));
@@ -64,6 +65,39 @@ void rejected(Fixture f, const std::string &reason, bwb::Config config = {}) {
     require(!bwb::recoverSurfaceIntersection(f.points, config, {}, f.result), "unsafe case accepted: "+reason);
     require(f.result.message.find(reason) != std::string::npos, f.result.message);
     require(f.result.trajectory.empty(), "failed surface must not produce trajectory");
+}
+
+void weldedEdgeInvariant(const Eigen::Matrix3d &rotation, const bwb::Vec3 &translation) {
+    auto clean = fixture(0.4, 0.02);
+    auto welded = clean;
+    // A bead distorts only the excluded edge strip. Leave the body and B identical.
+    for (auto &p : welded.points)
+        if (p.xyz.z() < 8.5 && std::abs(p.xyz.x()) < 12.0)
+            p.xyz.y() += 12.0 * (1.0 - p.xyz.z()/8.5);
+    for (auto *f : {&clean, &welded}) {
+        for (auto &p : f->points) p.xyz = rotation*p.xyz + translation;
+        f->result.referenceOrigin = translation;
+        f->result.referenceLongitudinal = rotation*bwb::Vec3::UnitX();
+        auto &a = f->result.referenceSegments[0].plane;
+        a.normal = rotation*bwb::Vec3::UnitZ();
+        a.d = -a.normal.dot(translation);
+        require(bwb::recoverSurfaceIntersection(f->points, {}, {}, f->result), f->result.message);
+        require(!f->result.usedProjectionFallback, "weld test must exercise body extension");
+        for (const auto &station : f->result.intersectionStations) {
+            require(station.supportMinHeight >= 8.5-1e-7 &&
+                        station.supportMaxHeight <= 31.5+1e-7,
+                    "edge points leaked into the fit support");
+            const auto source = rotation.transpose() *
+                (f->points[station.point.source].xyz-translation);
+            require(source.z() >= 8.5-1e-7, "representative support came from the welded edge");
+        }
+    }
+    require(clean.result.projected.size() == welded.result.projected.size(),
+            "edge bead changed curve coverage");
+    for (std::size_t i = 0; i < clean.result.projected.size(); ++i)
+        require((clean.result.projected[i].xyz-welded.result.projected[i].xyz).norm() < 1e-7,
+                "edge bead changed nominal body trajectory");
+    std::cout << "excluded weld invariance passed\n";
 }
 }
 int main() {
@@ -77,10 +111,17 @@ int main() {
             const auto r = Eigen::AngleAxisd(1.5707963267948966, axis.normalized()).toRotationMatrix();
             analytic(0.4, 0.02, r, {100000,-250000,50000}, "rotated/translated curved surface");
         }
-        rejected(fixture(0,0,6), "surface_extrapolation_limit");
-        rejected(fixture(1,0,4), "surface_extrapolation_limit"); // arc > 5 although height < 5
+        weldedEdgeInvariant(identity, zero);
+        weldedEdgeInvariant(Eigen::AngleAxisd(1.1, bwb::Vec3(1,2,-3).normalized())
+                                .toRotationMatrix(), {100000,-250000,50000});
+        auto strictLimit = bwb::Config{};
+        strictLimit.maxSurfaceExtrapolation = 8.0;
+        rejected(fixture(0,0,6), "surface_extrapolation_limit", strictLimit);
+        strictLimit.maxSurfaceExtrapolation = 10.0;
+        rejected(fixture(1,0,4), "surface_extrapolation_limit", strictLimit); // arc > 10 at height 8.5
         auto fallback = fixture(0.4,0,6);
-        require(bwb::recoverSurfaceIntersection(fallback.points, {}, {}, fallback.result),
+        strictLimit.maxSurfaceExtrapolation = 5.0;
+        require(bwb::recoverSurfaceIntersection(fallback.points, strictLimit, {}, fallback.result),
                 "whole-curve projection fallback must recover unsupported intersection stations");
         require(fallback.result.usedProjectionFallback &&
                     std::all_of(fallback.result.projected.begin(), fallback.result.projected.end(),
@@ -97,13 +138,18 @@ int main() {
                     "projection fallback was mislabeled as the analytic intersection");
         }
         auto onLimit = fixture(0,0,5);
-        require(bwb::recoverSurfaceIntersection(onLimit.points, {}, {}, onLimit.result),
-                "exactly 5 mm supported extrapolation must be accepted");
+        strictLimit.maxSurfaceExtrapolation = 8.5;
+        require(bwb::recoverSurfaceIntersection(onLimit.points, strictLimit, {}, onLimit.result),
+                "exactly 8.5 mm supported body extension must be accepted");
         require(!onLimit.result.usedProjectionFallback,
                 "a supported intersection must not use projection fallback");
         rejected(fixture(0,0,1,true), "missing_B_seed");
-        auto tangent = fixture(6,0);
-        rejected(std::move(tangent), "near_tangent_intersection");
+        auto missingSeed = fixture(0,0,1,true);
+        require(!bwb::recoverSurfaceIntersection(missingSeed.points, {}, {}, missingSeed.result),
+                "projection fallback must not bridge an empty B section");
+        auto tangentLimit = bwb::Config{};
+        tangentLimit.minIntersectionAngleDegrees = 60.0;
+        rejected(fixture(1,0), "near_tangent_intersection", tangentLimit);
         auto noExtrapolation = bwb::Config{};
         noExtrapolation.maxSurfaceExtrapolation = 0;
         rejected(fixture(0,0), "surface_extrapolation_limit", noExtrapolation);
