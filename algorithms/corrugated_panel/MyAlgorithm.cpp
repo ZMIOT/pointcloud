@@ -82,8 +82,10 @@ fw::CloudData generatedCloud(const fw::CloudData &input,
         {"surface_rms", pcl::PCLPointField::FLOAT32},
         {"support_count", pcl::PCLPointField::UINT32},
         {"surface_degree", pcl::PCLPointField::UINT32},
-        {"is_projection_fallback", pcl::PCLPointField::UINT32}};
-    for (std::size_t i = 0; i < 12; ++i) {
+        {"is_projection_fallback", pcl::PCLPointField::UINT32},
+        {"is_line_fitted", pcl::PCLPointField::UINT32},
+        {"line_intersection_gap", pcl::PCLPointField::FLOAT32}};
+    for (std::size_t i = 0; i < 14; ++i) {
         pcl::PCLPointField field;
         field.name = definitions[i].first;
         field.offset = std::uint32_t(i * 4);
@@ -93,7 +95,7 @@ fw::CloudData generatedCloud(const fw::CloudData &input,
     }
     cloud->height = 1;
     cloud->width = std::uint32_t(points.size());
-    cloud->point_step = 48;
+    cloud->point_step = 56;
     cloud->row_step = cloud->point_step * cloud->width;
     cloud->is_dense = true;
     cloud->is_bigendian = false;
@@ -118,6 +120,10 @@ fw::CloudData generatedCloud(const fw::CloudData &input,
         std::memcpy(destination + 36, &points[i].supportCount, 4);
         std::memcpy(destination + 40, &degree, 4);
         std::memcpy(destination + 44, &projectionFallback, 4);
+        const std::uint32_t lineFitted = points[i].lineFitted ? 1u : 0u;
+        const float lineGap = float(points[i].lineIntersectionGap);
+        std::memcpy(destination + 48, &lineFitted, 4);
+        std::memcpy(destination + 52, &lineGap, 4);
     }
     fw::CloudData output = input;
     output.id = input.id + id;
@@ -218,7 +224,18 @@ QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
                                              segment.plane.normal.z(),
                                              segment.plane.d}}});
     }
+    QJsonArray lineFits;
+    double maxLineJunctionGap = 0;
+    for (const auto &p : result.fittedLine)
+        maxLineJunctionGap = std::max(maxLineJunctionGap,p.lineIntersectionGap);
+    for (const auto &line : result.lineModels)
+        lineFits.append(QJsonObject{{"first_sample", int(line.first)}, {"last_sample", int(line.last)},
+            {"support_count", int(line.support)}, {"sample_count", int(line.last-line.first+1)},
+            {"rms", line.rms},
+            {"origin", QJsonArray{line.origin.x(),line.origin.y(),line.origin.z()}},
+            {"direction", QJsonArray{line.direction.x(),line.direction.y(),line.direction.z()}}});
     return {{"algorithm_elapsed_ms", double(elapsedMs)},
+            {"line_fits", lineFits}, {"max_line_junction_gap", maxLineJunctionGap},
             {"surface_intersection", QJsonObject{
                 {"method", result.usedProjectionFallback
                     ? "whole_curve_B_to_A_projection_fallback"
@@ -482,7 +499,7 @@ class CorrugatedPanelPlugin final : public QObject, public fw::IAlgorithmPlugin 
     fw::AlgorithmDescriptor descriptor() const override {
         return {"custom.corrugatedPanelFeature",
                 QStringLiteral("波纹板特征提取：竖直放置"),
-                "1.7.3",
+                "1.7.4",
                 {"x", "y", "z"}};
     }
     QJsonObject parameterSchema() const override { return schema(); }

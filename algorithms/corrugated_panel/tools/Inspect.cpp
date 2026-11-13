@@ -39,14 +39,15 @@ bool readTextCloud(const std::filesystem::path &path, std::vector<bwb::Point> &p
 void writePoints(const std::filesystem::path &path,
                  const std::vector<bwb::ProjectedPoint> &points) {
     std::ofstream output(path);
-    output << "source_index x y z is_corner reference_index is_extrapolated extrapolation_distance surface_rms support_count surface_degree is_projection_fallback\n" << std::setprecision(12);
+    output << "source_index x y z is_corner reference_index is_extrapolated extrapolation_distance surface_rms support_count surface_degree is_projection_fallback is_line_fitted line_intersection_gap\n" << std::setprecision(12);
     for (const auto &point : points)
         output << point.source << ' ' << point.xyz.x() << ' ' << point.xyz.y() << ' '
                << point.xyz.z() << ' ' << (point.corner ? 1 : 0) << ' '
                << point.referenceIndex << ' ' << point.extrapolated << ' '
                << point.extrapolationDistance << ' ' << point.surfaceRms << ' '
                << point.supportCount << ' ' << point.surfaceDegree << ' '
-               << point.projectionFallback << '\n';
+               << point.projectionFallback << ' ' << point.lineFitted << ' '
+               << point.lineIntersectionGap << '\n';
 }
 
 void writeIndexed(const std::filesystem::path &path, const std::vector<bwb::Point> &points,
@@ -65,7 +66,7 @@ void writeIndexed(const std::filesystem::path &path, const std::vector<bwb::Poin
 int main(int argc, char **argv) {
     if (argc < 2 || argc > 5) {
         std::cerr << "用法: CorrugatedPanelInspect <index-x-y-z.txt> [输出目录] "
-                     "[坡段合并容差] [局部基准面最大长度]\n";
+                     "[坡段拟合容差] [局部基准面最大长度]\n";
         return 2;
     }
     std::vector<bwb::Point> points;
@@ -93,7 +94,7 @@ int main(int argc, char **argv) {
         try {
             config.lineFitTolerance = std::stod(argv[3]);
         } catch (...) {
-            std::cerr << "坡段合并容差必须是有效数字\n";
+            std::cerr << "坡段拟合容差必须是有效数字\n";
             return 2;
         }
     }
@@ -129,6 +130,15 @@ int main(int argc, char **argv) {
     for (const auto &point : result.whitePoints)
         cornerCount += point.corner ? 1u : 0u;
     std::cout << "white_corner_points=" << cornerCount << '\n';
+    double maxJunctionGap = 0;
+    for (const auto &p : result.fittedLine) maxJunctionGap = std::max(maxJunctionGap,p.lineIntersectionGap);
+    std::cout << "max_line_junction_gap=" << maxJunctionGap << '\n';
+    for (std::size_t i = 0; i < result.lineModels.size(); ++i) {
+        const auto &line = result.lineModels[i];
+        std::cout << "line[" << i << "] support=" << line.support << '/' << line.last-line.first+1
+                  << " rms=" << line.rms << " origin=" << line.origin.transpose()
+                  << " direction=" << line.direction.transpose() << '\n';
+    }
     std::map<std::string, int> failures;
     double maxExtrapolation = 0, maxRms = 0;
     int curved = 0, intersectionFailures = 0;

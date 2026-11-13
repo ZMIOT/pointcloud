@@ -32,7 +32,7 @@ endif()
 framework_add_plugin(CorrugatedPanelAlgorithm TYPE algorithm
   ID custom.corrugatedPanelFeature
   ALGORITHM_ID custom.corrugatedPanelFeature
-  VERSION 1.7.3
+  VERSION 1.7.4
   PARAMETER_VERSION 5
   SOURCES MyAlgorithm.cpp parameters.qrc)
 target_link_libraries(CorrugatedPanelAlgorithm PRIVATE CorrugatedPanelCore)

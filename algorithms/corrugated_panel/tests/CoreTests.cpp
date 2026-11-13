@@ -366,8 +366,8 @@ void corrugatedSideIsSelected() {
                     return (fitted.xyz - measured.xyz).norm() < 1e-8;
                 });
         });
-    require(!fittedAwayFromSamples,
-            "slope control points must be located on the recovered curve");
+    require(fittedAwayFromSamples,
+            "fitted line intersections must not be constrained to recovered samples");
     require(result.whitePoints.size() > 10,
             "white points must be distributed along the fitted line");
     for (const auto &point : result.trajectory)
@@ -716,14 +716,17 @@ void slopePhasesUseOneLineEach() {
     for (std::size_t i = 0; i < 4; ++i)
         require(std::abs(result.fittedLine[i+1].xyz.x()-expectedTurns[i]) < 3.0,
                 "slope transition is displaced from the known turn");
-    require((result.fittedLine.front().xyz-result.trajectory.front().xyz).norm() < 1e-10 &&
-                (result.fittedLine.back().xyz-result.trajectory.back().xyz).norm() < 1e-10,
-            "slope endpoints must preserve the recovered curve endpoints");
-    for (const auto &corner : result.fittedLine)
-        require(std::any_of(result.trajectory.begin(), result.trajectory.end(),
-                           [&](const bwb::ProjectedPoint &p) {
-                               return (p.xyz-corner.xyz).norm() < 1e-10;
-                           }), "slope control points must stay on the recovered curve");
+    require(result.lineModels.size() == 5, "one consensus line per phase is required");
+    for (std::size_t i = 0; i < result.lineModels.size(); ++i) {
+        const auto &line = result.lineModels[i];
+        require(line.support*2 > line.last-line.first+1, "line needs majority support");
+        for (auto j : {i, i+1}) {
+            const Vec3 d = result.fittedLine[j].xyz-line.origin;
+            require((d-line.direction*line.direction.dot(d)).norm() < 1e-6,
+                    "coplanar junction must lie on both independently fitted lines");
+            require(result.fittedLine[j].lineFitted, "synthetic junction must be marked");
+        }
+    }
     require(std::count_if(result.whitePoints.begin(), result.whitePoints.end(),
                           [](const bwb::ProjectedPoint &point) {
                               return point.corner;
@@ -742,8 +745,54 @@ void slopePhasesUseOneLineEach() {
             "a short terminal downhill must remain one complete phase");
     require(std::abs(tail.fittedLine[2].xyz.x()-20.0) < 3.0,
             "terminal downhill starts before the known turn");
-    require((tail.fittedLine.back().xyz-tail.trajectory.back().xyz).norm() < 1e-10,
-            "terminal downhill endpoint must not move");
+    require((tail.fittedLine.back().xyz-tail.trajectory.back().xyz).norm() < config.lineFitTolerance,
+            "terminal endpoint projection must remain close to the observed coverage");
+}
+
+void roundedTurnsUseVirtualLineIntersections() {
+    std::vector<bwb::ProjectedPoint> curve;
+    const auto profile = [](double x) {
+        if (x < -80) return 0.0;
+        if (x < -20) return 0.5*(x+80);
+        if (x < 20) return 30.0;
+        if (x < 80) return 0.5*(80-x);
+        return 0.0;
+    };
+    for (int x = -120; x <= 120; ++x) {
+        double y = 0;
+        for (int k = -8; k <= 8; ++k) y += profile(x+k)/17.0;
+        bwb::ProjectedPoint p;
+        p.xyz = Vec3(x,y,0);
+        p.source = std::uint32_t(curve.size());
+        curve.push_back(p);
+    }
+    bwb::Config config;
+    config.lineFitTolerance = 0.3;
+    bwb::Result fit;
+    require(bwb::fitTrajectoryLines(curve,config,fit),fit.message);
+    require(fit.fittedLine.size() == 6, "rounded five-phase fixture must retain five lines");
+    const Vec3 turns[] = {{-80,0,0},{-20,30,0},{20,30,0},{80,0,0}};
+    for (std::size_t i = 0; i < 4; ++i) {
+        require((fit.fittedLine[i+1].xyz-turns[i]).norm() < 0.5,
+                "majority-supported lines must recover virtual sharp turn");
+        double nearest = 1e9;
+        for (const auto &p : curve) nearest = std::min(nearest,(p.xyz-fit.fittedLine[i+1].xyz).norm());
+        require(nearest > 0.5, "virtual turn must not be snapped back onto rounded samples");
+    }
+    // Scattered off-line points must not determine the line or add phases.
+    auto noisy = curve;
+    for (auto i : {std::size_t(12),std::size_t(110),std::size_t(228)}) noisy[i].xyz.y() += 1.0;
+    bwb::Result robust;
+    require(bwb::fitTrajectoryLines(noisy,config,robust),robust.message);
+    require(robust.fittedLine.size() == fit.fittedLine.size(), "isolated outliers created extra phases");
+    for (std::size_t i = 0; i < fit.fittedLine.size(); ++i)
+        require((fit.fittedLine[i].xyz-robust.fittedLine[i].xyz).norm() < 0.15,
+                "sparse outliers moved majority-supported line intersections");
+    auto skew = curve;
+    for (auto &p : skew) if (p.xyz.x() > -20 && p.xyz.x() < 20) p.xyz.z() = 5.0;
+    bwb::Result rejected;
+    require(!bwb::fitTrajectoryLines(skew,config,rejected) && rejected.fittedLine.empty() &&
+                rejected.whitePoints.empty(), "unsupported 3D joins must not emit a fake trajectory");
 }
 
 } // namespace
@@ -761,6 +810,7 @@ int main() {
     leadingEdgeDistractorDoesNotReplaceReference();
     diffuseBandDoesNotReplaceReference();
     slopePhasesUseOneLineEach();
+    roundedTurnsUseVirtualLineIntersections();
     std::cout << "CorrugatedPanelCore tests passed\n";
     return 0;
 }

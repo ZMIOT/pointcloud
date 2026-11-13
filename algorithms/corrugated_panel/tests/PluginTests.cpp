@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
         require(fw::Parameters::validateSchema(schema).isEmpty(), "invalid parameter schema");
         const auto parameters = fw::Parameters::defaults(schema);
         require(schema.value("parameterVersion").toInt() == 5 &&
-                    plugin->descriptor().version == "1.7.3", "plugin version mismatch");
+                    plugin->descriptor().version == "1.7.4", "plugin version mismatch");
         fw::ParameterSet old{{"trajectory_spacing", 3.0}}, migrated;
         QString migrationError;
         require(plugin->migrateParameters(3, old, migrated, migrationError) &&
@@ -149,10 +149,12 @@ int main(int argc, char **argv) {
                 "intersection station metrics missing");
         require(fw::hasFields(result.outputs[3], {"x", "y", "z", "source_index"}),
                 "measured curve metadata missing");
-        require(fw::hasFields(result.outputs[4], {"x", "y", "z", "source_index"}),
+        require(fw::hasFields(result.outputs[4], {"x", "y", "z", "source_index", "is_line_fitted", "line_intersection_gap"}),
                 "fitted line metadata missing");
+        require(result.metrics.value("line_fits").toArray().size()+1 == int(result.outputs[4].cloud->width),
+                "one independent fitted model per output segment is required");
         require(fw::hasFields(result.outputs[5],
-                              {"x", "y", "z", "source_index", "is_corner"}),
+                              {"x", "y", "z", "source_index", "is_corner", "is_line_fitted", "line_intersection_gap"}),
                 "white point metadata missing");
         require(result.outputs[3].cloud->data != result.outputs[4].cloud->data,
                 "measured curve and fitted line must remain separate outputs");

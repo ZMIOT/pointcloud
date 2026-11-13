@@ -1016,16 +1016,88 @@ std::vector<std::size_t> slopePhaseAnchors(
     return anchors.size() >= 2 ? anchors : simplifyPolyline(points, tolerance);
 }
 
-struct FittedSegment {
-    Vec3 origin = Vec3::Zero();
-    Vec3 direction = Vec3::UnitX();
-};
-
 struct FittedPolyline {
     std::vector<std::size_t> anchors;
-    std::vector<FittedSegment> segments;
+    std::vector<FittedLineModel> segments;
     std::vector<ProjectedPoint> corners;
+    std::string failure;
 };
+
+bool consensusLine(const std::vector<ProjectedPoint> &points, std::size_t first,
+                   std::size_t last, double tolerance, FittedLineModel &line) {
+    line.first = first;
+    line.last = last;
+    if (last <= first) return false;
+    // Deterministic bounded pair search, ranked by support count, then inlier SSE.
+    // Source order makes candidate selection independent of traversal direction.
+    std::vector<std::size_t> candidates;
+    for (std::size_t i = first; i <= last; ++i) candidates.push_back(i);
+    std::sort(candidates.begin(), candidates.end(), [&](std::size_t a, std::size_t b) {
+        return points[a].source < points[b].source;
+    });
+    if (candidates.size() > 64) {
+        std::vector<std::size_t> sampled;
+        for (std::size_t i = 0; i < 64; ++i)
+            sampled.push_back(candidates[i*(candidates.size()-1)/63]);
+        candidates.swap(sampled);
+    }
+    std::vector<std::size_t> bestInliers;
+    double bestError = std::numeric_limits<double>::infinity();
+    const auto classify = [&](const Vec3 &origin, const Vec3 &direction, double &error) {
+        std::vector<std::size_t> inliers;
+        error = 0.0;
+        for (std::size_t i = first; i <= last; ++i) {
+            const Vec3 d = points[i].xyz-origin;
+            const double residual = (d-direction*direction.dot(d)).squaredNorm();
+            if (residual <= tolerance*tolerance) {
+                inliers.push_back(i);
+                error += residual;
+            }
+        }
+        return inliers;
+    };
+    for (std::size_t a = 0; a < candidates.size(); ++a) {
+        for (std::size_t b = a+1; b < candidates.size(); ++b) {
+            const Vec3 origin = points[candidates[a]].xyz;
+            const Vec3 delta = points[candidates[b]].xyz-origin;
+            if (delta.squaredNorm() < 1e-12) continue;
+            double error;
+            auto inliers = classify(origin, delta.normalized(), error);
+            if (inliers.size() > bestInliers.size() ||
+                (inliers.size() == bestInliers.size() && error < bestError-1e-9)) {
+                bestInliers = std::move(inliers);
+                bestError = error;
+            }
+        }
+    }
+    if (bestInliers.size() < 2 || bestInliers.size()*2 <= last-first+1) return false;
+    // Orthogonal least squares over all consensus support, never just two endpoints.
+    for (int pass = 0; pass < 5; ++pass) {
+        const Vec3 center = points[first].xyz;
+        Vec3 mean = Vec3::Zero();
+        for (auto i : bestInliers) mean += points[i].xyz-center;
+        mean /= double(bestInliers.size());
+        Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+        for (auto i : bestInliers) {
+            const Vec3 d = points[i].xyz-center-mean;
+            covariance.noalias() += d*d.transpose();
+        }
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+        if (solver.info() != Eigen::Success || solver.eigenvalues()[2] < 1e-12) return false;
+        line.origin = center+mean;
+        line.direction = solver.eigenvectors().col(2).normalized();
+        if (line.direction.dot(points[last].xyz-points[first].xyz) < 0)
+            line.direction = -line.direction;
+        double error;
+        auto inliers = classify(line.origin, line.direction, error);
+        line.support = inliers.size();
+        line.rms = std::sqrt(error / std::max(std::size_t(1), inliers.size()));
+        if (inliers == bestInliers || pass == 4) break;
+        if (inliers.size() < 2 || inliers.size()*2 <= last-first+1) return false;
+        bestInliers = std::move(inliers);
+    }
+    return line.support >= 2 && line.support*2 > last-first+1;
+}
 
 void refineSlopeTransitions(const std::vector<ProjectedPoint> &points,
                             std::vector<std::size_t> &anchors) {
@@ -1076,7 +1148,7 @@ void refineSlopeTransitions(const std::vector<ProjectedPoint> &points,
 }
 
 FittedPolyline fitPolyline(const std::vector<ProjectedPoint> &points,
-                           double tolerance) {
+                           double tolerance, double junctionTolerance) {
     FittedPolyline fitted;
     if (points.size() < 2)
         return fitted;
@@ -1085,20 +1157,61 @@ FittedPolyline fitPolyline(const std::vector<ProjectedPoint> &points,
         return fitted;
     refineSlopeTransitions(points, fitted.anchors);
 
-    // The identified slope endpoints define exactly one segment per phase.
-    // Do not relocate them using intersections of infinite best-fit lines.
     fitted.segments.reserve(fitted.anchors.size() - 1);
     fitted.corners.reserve(fitted.anchors.size());
+    for (std::size_t i = 1; i < fitted.anchors.size(); ++i) {
+        FittedLineModel line;
+        if (!consensusLine(points, fitted.anchors[i-1], fitted.anchors[i], tolerance, line)) {
+            fitted.failure = "坡段直线拟合失败：容差内缺少多数有效点，不能仅由端点强行连线。";
+            return fitted;
+        }
+        fitted.segments.push_back(line);
+    }
+    const auto project = [](const Vec3 &p, const FittedLineModel &line) -> Vec3 {
+        return line.origin+line.direction*line.direction.dot(p-line.origin);
+    };
     for (std::size_t i = 0; i < fitted.anchors.size(); ++i) {
         auto point = points[fitted.anchors[i]];
         point.corner = true;
+        point.lineFitted = true;
+        if (i == 0) point.xyz = project(point.xyz, fitted.segments.front());
+        else if (i+1 == fitted.anchors.size()) point.xyz = project(point.xyz, fitted.segments.back());
+        else {
+            const auto &left = fitted.segments[i-1];
+            const auto &right = fitted.segments[i];
+            const double cosine = left.direction.dot(right.direction);
+            const double denominator = 1.0-cosine*cosine;
+            // Below 3 degrees, a small fit error can send the intersection arbitrarily far away.
+            if (denominator < 0.0027390523158633) {
+                fitted.failure = "相邻坡段直线近乎平行（锐角小于3度），无法稳定求拐点。";
+                return fitted;
+            }
+            const Vec3 delta = right.origin-left.origin;
+            const double a = (left.direction.dot(delta)-cosine*right.direction.dot(delta))/denominator;
+            const double b = (cosine*left.direction.dot(delta)-right.direction.dot(delta))/denominator;
+            const Vec3 p = left.origin+a*left.direction;
+            const Vec3 q = right.origin+b*right.direction;
+            point.lineIntersectionGap = (p-q).norm();
+            if (point.lineIntersectionGap > junctionTolerance) {
+                fitted.failure = "相邻坡段三维拟合直线不相交，最近距离超过连接容差。";
+                return fitted;
+            }
+            // Exact intersection for coplanar lines; explicitly measured approximation otherwise.
+            const Vec3 junction = (p+q)*0.5;
+            const double leftSpan = (points[fitted.anchors[i]].xyz-points[fitted.anchors[i-1]].xyz).norm();
+            const double rightSpan = (points[fitted.anchors[i+1]].xyz-points[fitted.anchors[i]].xyz).norm();
+            if ((junction-point.xyz).norm() > std::max(4.0*tolerance, 0.5*std::min(leftSpan,rightSpan))) {
+                fitted.failure = "相邻坡段交点远离局部转换区域，拒绝无限延长形成跳点。";
+                return fitted;
+            }
+            point.xyz = junction;
+        }
         fitted.corners.push_back(point);
-        if (i > 0) {
-            FittedSegment segment;
-            segment.origin = fitted.corners[i-1].xyz;
-            const Vec3 delta = point.xyz - segment.origin;
-            if (delta.squaredNorm() > kEpsilon) segment.direction = delta.normalized();
-            fitted.segments.push_back(segment);
+    }
+    for (std::size_t i = 0; i < fitted.segments.size(); ++i) {
+        if ((fitted.corners[i+1].xyz-fitted.corners[i].xyz).dot(fitted.segments[i].direction) <= 1e-6) {
+            fitted.failure = "相邻交点顺序倒置或坡段退化，不能生成白点轨迹。";
+            return fitted;
         }
     }
     return fitted;
@@ -1145,16 +1258,47 @@ std::vector<ProjectedPoint> projectMeasuredPoints(
             auto point = measured[best];
             point.xyz = projected;
             point.corner = false;
+            point.lineFitted = true;
+            point.lineIntersectionGap = 0.0;
             result.push_back(point);
             lastSelected = best;
         }
-        // 坡段拐点来自恢复曲线，必须原样进入白点序列。
+        // 合成交点必须原样进入白点序列。
         result.push_back(line.corners[segment + 1]);
     }
     return result;
 }
 
 } // namespace
+
+bool fitTrajectoryLines(const std::vector<ProjectedPoint> &trajectory,
+                        const Config &config, Result &result) {
+    result.fittedLine.clear();
+    result.whitePoints.clear();
+    result.lineModels.clear();
+    if (trajectory.size() < 2 || !std::isfinite(config.lineFitTolerance) ||
+        config.lineFitTolerance <= 0 || !std::isfinite(config.whitePointSpacing) ||
+        config.whitePointSpacing <= 0 || !std::isfinite(config.surfaceFitTolerance) ||
+        config.surfaceFitTolerance <= 0 ||
+        std::any_of(trajectory.begin(), trajectory.end(), [](const ProjectedPoint &p) { return !p.xyz.allFinite(); })) {
+        result.message = "直线拟合输入或参数无效。";
+        return false;
+    }
+    const auto fitted = fitPolyline(trajectory, config.lineFitTolerance,
+                                   std::min(config.lineFitTolerance, config.surfaceFitTolerance));
+    result.lineModels = fitted.segments;
+    if (!fitted.failure.empty()) {
+        result.message = fitted.failure;
+        return false;
+    }
+    result.fittedLine = fitted.corners;
+    result.whitePoints = projectMeasuredPoints(trajectory, fitted, config.whitePointSpacing);
+    if (result.fittedLine.size() < 2 || result.whitePoints.size() < 2) {
+        result.message = "中心轨迹已生成，但无法拟合折线并平均分配白色点。";
+        return false;
+    }
+    return true;
+}
 
 std::string validateConfig(const Config &config) {
     if (!std::isfinite(config.maxSurfaceExtrapolation) || config.maxSurfaceExtrapolation < 0.0 ||
@@ -1342,14 +1486,7 @@ Result extract(const std::vector<Point> &points, const Config &config, const Hoo
         result.message = "特征曲线候选已生成，但无法生成连续均匀轨迹。";
         return result;
     }
-    const auto fitted = fitPolyline(result.trajectory, config.lineFitTolerance);
-    result.fittedLine = fitted.corners;
-    result.whitePoints = projectMeasuredPoints(result.trajectory, fitted,
-                                               config.whitePointSpacing);
-    if (result.fittedLine.size() < 2 || result.whitePoints.size() < 2) {
-        result.message = "中心轨迹已生成，但无法拟合折线并平均分配白色点。";
-        return result;
-    }
+    if (!fitTrajectoryLines(result.trajectory, config, result)) return result;
     result.ok = true;
     result.message = result.usedProjectionFallback
         ? "局部表面无法在全部站位稳定求交，已按启用的回退策略将整条 B 特征曲线投影到对应基准面；该结果不是表面交线。"

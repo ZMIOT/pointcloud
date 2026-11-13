@@ -85,6 +85,15 @@ struct ProjectedPoint {
     std::uint32_t supportCount = 0;
     int surfaceDegree = 0;
     bool projectionFallback = false;
+    bool lineFitted = false; // Synthetic line geometry; source is provenance, not a measured vertex.
+    double lineIntersectionGap = 0.0; // Nonzero for a bounded 3D closest-approach junction.
+};
+
+struct FittedLineModel {
+    Vec3 origin = Vec3::Zero();
+    Vec3 direction = Vec3::UnitX();
+    std::size_t first = 0, last = 0, support = 0;
+    double rms = 0.0;
 };
 
 struct IntersectionStation {
@@ -128,7 +137,8 @@ struct Result {
     double bodyBandMin = 0.0;
     double bodyBandMax = 0.0;
     std::vector<ProjectedPoint> trajectory; // 求交恢复或全局投影回退曲线，不是直接实测点
-    std::vector<ProjectedPoint> fittedLine; // 恢复曲线上的坡段起止控制点，一坡一段
+    std::vector<FittedLineModel> lineModels;
+    std::vector<ProjectedPoint> fittedLine; // 相邻稳健拟合直线交点，可为合成点，一坡一段
     std::vector<ProjectedPoint> whitePoints; // 恢复曲线采样后投影到整段拟合直线
 };
 
@@ -143,6 +153,9 @@ struct Hooks {
 };
 
 std::string validateConfig(const Config &config);
+// Fits only the downstream line stage; leaves upstream surface evidence unchanged.
+bool fitTrajectoryLines(const std::vector<ProjectedPoint> &trajectory,
+                        const Config &config, Result &result);
 Result extract(const std::vector<Point> &points, const Config &config = {},
                const Hooks &hooks = {});
 

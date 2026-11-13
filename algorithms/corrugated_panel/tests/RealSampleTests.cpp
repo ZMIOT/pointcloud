@@ -79,13 +79,12 @@ int main(int argc, char **argv) {
             require(result.referenceSegments.size() == 2 && !result.usedProjectionFallback &&
                         result.projected.size() == 383, "3.txt feature coverage or fallback changed");
             require(result.fittedLine.size() == 18, "3.txt gained a spurious slope segment");
-            require((result.fittedLine.front().xyz-result.trajectory.front().xyz).norm() < 1e-10 &&
-                        (result.fittedLine.back().xyz-result.trajectory.back().xyz).norm() < 1e-10,
-                    "3.txt endpoint was relocated by fitting");
+            require((result.fittedLine.front().xyz-result.trajectory.front().xyz).norm() < config.lineFitTolerance &&
+                        (result.fittedLine.back().xyz-result.trajectory.back().xyz).norm() < config.lineFitTolerance,
+                    "3.txt endpoint projection moved beyond the line-fit tolerance");
             for (const auto &corner : result.fittedLine)
-                require(std::any_of(result.trajectory.begin(), result.trajectory.end(),
-                        [&](const bwb::ProjectedPoint &p) { return (p.xyz-corner.xyz).norm() < 1e-10; }),
-                        "3.txt slope transition left the recovered curve");
+                require(corner.lineFitted && corner.lineIntersectionGap <= config.surfaceFitTolerance,
+                        "3.txt synthetic junction lost its fitting evidence");
             for (const auto &p : result.projected) {
                 require(!p.projectionFallback && p.referenceIndex < result.referenceSegments.size(),
                         "3.txt mixed curve modes or lost A ownership");
@@ -108,6 +107,24 @@ int main(int argc, char **argv) {
                     "8.txt feature coverage or fallback changed");
             require(result.fittedLine.size() == 18,
                     "8.txt narrow scan-line windows created spurious slope segments");
+            require(result.lineModels.size() == 17, "8.txt must fit one line per phase");
+            double squaredResidual = 0;
+            for (const auto &p : result.trajectory) {
+                double nearest = 1e30;
+                for (std::size_t j = 1; j < result.fittedLine.size(); ++j) {
+                    const bwb::Vec3 start = result.fittedLine[j-1].xyz;
+                    const bwb::Vec3 delta = result.fittedLine[j].xyz-start;
+                    const double t = std::clamp((p.xyz-start).dot(delta)/delta.squaredNorm(),0.0,1.0);
+                    nearest = std::min(nearest,(p.xyz-start-t*delta).squaredNorm());
+                }
+                squaredResidual += nearest;
+            }
+            // Internal model-consistency guard, NOT a physical accuracy assertion.
+            require(std::sqrt(squaredResidual/result.trajectory.size()) < 0.75,
+                    "8.txt reverted to chords pinned to recovered samples");
+            for (const auto &line : result.lineModels)
+                require(line.support*2 > line.last-line.first+1,
+                        "8.txt fitted a line without majority support");
             const auto suppressed = std::count_if(
                 result.intersectionStations.begin(), result.intersectionStations.end(),
                 [](const bwb::IntersectionStation &s) { return !s.lengthSlopeIdentifiable; });
