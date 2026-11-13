@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "algorithmId": "weld.frame_seam",
+  "parameterVersion": 1,
+  "title": "焊缝识别：单帧轮廓与邻帧局部面",
+  "groups": [
+    {"id":"input","title":"原始扫描帧","parameters":[
+      {"id":"manifest","type":"file","label":"帧索引 manifest.json","default":"manifest.json","required":true,"mustExist":true,"filter":"JSON (*.json)","description":"选择与输入点云逐点对应的原始帧索引，帧文件须保留在索引同目录。"},
+      {"id":"name","type":"string","label":"结果名称前缀","default":"焊缝","required":true,"maxLength":64},
+      {"id":"frameBinSize","type":"double","label":"帧内分箱尺寸","default":0.25,"min":0.001,"max":1000,"decimals":3,"step":0.01,"unit":"坐标单位"},
+      {"id":"frameCornerWindow","type":"double","label":"轮廓拟合窗口","default":2.5,"min":0.301,"max":10000,"decimals":3,"step":0.1,"unit":"坐标单位"},
+      {"id":"frameMinTurnDegrees","type":"double","label":"最小转折角","default":25,"min":0,"max":180,"decimals":2,"step":1,"unit":"°"},
+      {"id":"frameMinDepth","type":"double","label":"最小槽深","default":3,"min":0,"max":10000,"decimals":3,"step":0.1,"unit":"坐标单位"}
+    ]},
+    {"id":"surface","title":"邻帧局部面","parameters":[
+      {"id":"frameSurfaceNeighbors","type":"int","label":"前后邻帧数量","default":3,"min":0,"max":100,"step":1},
+      {"id":"frameSurfaceMaxRms","type":"double","label":"局部面最大 RMS","default":0.6,"min":0.001,"max":1000,"decimals":3,"step":0.01,"unit":"坐标单位"},
+      {"id":"frameMaxCorrection","type":"double","label":"最大位置修正","default":1.2,"min":0,"max":1000,"decimals":3,"step":0.1,"unit":"坐标单位"},
+      {"id":"minSeamSeparation","type":"double","label":"左右焊缝最小间距","default":16,"min":0,"max":10000,"decimals":3,"step":1,"unit":"坐标单位"}
+    ]},
+    {"id":"advanced","title":"高级与调试","advanced":true,"parameters":[
+      {"id":"frameMaxProfileGap","type":"double","label":"轮廓最大间隙","default":1.5,"min":0.001,"max":1000,"decimals":3,"step":0.1,"unit":"坐标单位"},
+      {"id":"frameSurfaceRadius","type":"double","label":"局部面搜索半径","default":4,"min":0.501,"max":1000,"decimals":3,"step":0.1,"unit":"坐标单位"},
+      {"id":"frameMaxPointDistance","type":"double","label":"距实测点最大距离","default":0.8,"min":0.001,"max":1000,"decimals":3,"step":0.1,"unit":"坐标单位"},
+      {"id":"frameMaxTrackJump","type":"double","label":"相邻帧最大跳变","default":3,"min":0.001,"max":1000,"decimals":3,"step":0.1,"unit":"坐标单位"},
+      {"id":"frameMaxMissing","type":"int","label":"最多跨越缺失帧数","default":3,"min":0,"max":1000,"step":1},
+      {"id":"debug_detail","type":"enum","label":"调试详细程度","default":"stages","options":[{"value":"stages","label":"主要处理步骤"},{"value":"frames","label":"主要步骤与逐帧快照"}],"description":"仅在工作台开启单步调试时生效；逐帧模式可能产生大量窗口。"}
+    ]}
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "algorithmId": "custom.carExtractFeature",
+  "parameterVersion": 1,
+  "values": {
+    "up_axis": "+z",
+    "neighborhood_scale": 1.0,
+    "smoothing": 1.0,
+    "max_missing": 3,
+    "manual_scan_normal": false,
+    "scan_nx": 0.0,
+    "scan_ny": 1.0,
+    "scan_nz": 0.0
+  }
+}

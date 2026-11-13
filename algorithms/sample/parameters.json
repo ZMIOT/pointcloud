@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "algorithmId": "cloud.sample_pipeline",
+  "parameterVersion": 1,
+  "title": "降采样 / 离群过滤 / 平面分割",
+  "groups": [
+    {
+      "id": "basic", "title": "输入与降采样",
+      "parameters": [
+        {"id":"name","type":"string","label":"结果名称","default":"提取平面","required":true,"maxLength":64},
+        {"id":"axis","type":"enum","label":"裁剪方向","default":"z","options":[{"value":"x","label":"X 轴"},{"value":"y","label":"Y 轴"},{"value":"z","label":"Z 轴"}]},
+        {"id":"limits","type":"range","valueType":"double","label":"保留范围","default":{"lower":-100,"upper":100},"min":-1000000,"max":1000000,"decimals":4,"step":0.1,"unit":"坐标单位"},
+        {"id":"enable_downsample","type":"bool","label":"启用降采样","default":true},
+        {"id":"leaf_size","type":"double","label":"体素尺寸","default":0.02,"min":0.000001,"max":10000,"decimals":6,"step":0.001,"unit":"坐标单位","enabledWhen":{"parameter":"enable_downsample","operator":"eq","value":true},"description":"尺寸越大，保留的点越少。"}
+      ]
+    },
+    {
+      "id":"filter", "title":"离群过滤与分割",
+      "parameters":[
+        {"id":"mean_k","type":"int","label":"邻域点数","default":20,"min":2,"max":1000},
+        {"id":"stddev","type":"double","label":"标准差倍数","default":1.0,"min":0.01,"max":100,"decimals":3},
+        {"id":"distance","type":"double","label":"平面距离阈值","default":0.01,"min":0.000001,"max":1000,"decimals":6,"unit":"坐标单位"},
+        {"id":"result_color","type":"color","label":"结果高亮颜色","default":[70,245,140,255]}
+      ]
+    },
+    {
+      "id":"advanced","title":"高级参数","advanced":true,
+      "parameters":[{"id":"max_iterations","type":"int","label":"最大迭代次数","default":200,"min":1,"max":10000}]
+    }
+  ]
+}

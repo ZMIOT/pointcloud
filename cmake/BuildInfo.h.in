@@ -1,0 +1,7 @@
+#pragma once
+#define FW_ABI_BASE "@FW_ABI_BASE@"
+#ifdef QT_DEBUG
+#define FW_BUILD_ID FW_ABI_BASE "|Debug"
+#else
+#define FW_BUILD_ID FW_ABI_BASE "|Release"
+#endif

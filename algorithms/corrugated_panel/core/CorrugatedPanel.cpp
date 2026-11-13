@@ -1,0 +1,1504 @@
+#include "CorrugatedPanel.h"
+
+#include <Eigen/Eigenvalues>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <limits>
+#include <numeric>
+#include <unordered_map>
+#include <utility>
+
+#ifdef BWB_HAS_OPENMP
+#include <omp.h>
+#endif
+
+namespace bwb {
+namespace {
+
+constexpr double kEpsilon = 1e-12;
+constexpr double kRadiansToDegrees = 57.2957795130823208768;
+
+std::uint64_t mix(std::uint64_t value) {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+}
+
+bool finite(const Vec3 &p) { return p.allFinite(); }
+
+bool stopped(const Hooks &hooks) { return hooks.cancelled && hooks.cancelled(); }
+
+void reportProgress(const Hooks &hooks, int value) {
+    if (hooks.progress)
+        hooks.progress(std::max(0, std::min(100, value)));
+}
+
+bool stage(const Hooks &hooks, int index, const Result &result) {
+    return !hooks.stage || hooks.stage(index, result);
+}
+
+template <typename T> T quantile(std::vector<T> values, double q) {
+    if (values.empty())
+        return T{};
+    q = std::max(0.0, std::min(1.0, q));
+    // 线性插值分位数关于坐标取反保持对称；向下取整会让 q 与 1-q 在偶数样本上
+    // 选择不互补的秩，导致同一工件旋转后区段边界偶尔多/少一个点。
+    std::sort(values.begin(), values.end());
+    const double position = q * double(values.size() - 1);
+    const std::size_t lower = std::size_t(std::floor(position));
+    const std::size_t upper = std::size_t(std::ceil(position));
+    const double fraction = position - double(lower);
+    return T(values[lower] * (1.0 - fraction) + values[upper] * fraction);
+}
+
+Plane fitPlane(const std::vector<Point> &points, const std::vector<int> &indices,
+               const Plane &fallback) {
+    if (indices.size() < 3)
+        return fallback;
+    Vec3 mean = Vec3::Zero();
+    for (int index : indices)
+        mean += points[std::size_t(index)].xyz;
+    mean /= double(indices.size());
+    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+    for (int index : indices) {
+        const Vec3 delta = points[std::size_t(index)].xyz - mean;
+        covariance.noalias() += delta * delta.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+    if (solver.info() != Eigen::Success)
+        return fallback;
+    Plane plane;
+    plane.normal = solver.eigenvectors().col(0).normalized();
+    if (plane.normal.dot(fallback.normal) < 0)
+        plane.normal = -plane.normal;
+    plane.origin = mean;
+    plane.d = -plane.normal.dot(mean);
+    return plane;
+}
+
+std::vector<int> inliers(const std::vector<Point> &points, const Plane &plane,
+                         double threshold) {
+    std::vector<int> result;
+    result.reserve(points.size() / 8);
+    for (std::size_t i = 0; i < points.size(); ++i)
+        if (finite(points[i].xyz) &&
+            std::abs(plane.normal.dot(points[i].xyz) + plane.d) <= threshold)
+            result.push_back(int(i));
+    return result;
+}
+
+struct PlaneCandidate {
+    Plane plane;
+    std::vector<int> fullInliers;
+    double score = -1.0;
+};
+
+PlaneCandidate detectReference(const std::vector<Point> &points, const Config &config,
+                               const Hooks &hooks) {
+    std::vector<int> sample;
+    const std::size_t stride =
+        std::max<std::size_t>(1, points.size() / std::size_t(config.maxRansacPoints));
+    sample.reserve(std::min<std::size_t>(points.size(), config.maxRansacPoints));
+    for (std::size_t i = 0; i < points.size(); i += stride)
+        if (finite(points[i].xyz))
+            sample.push_back(int(i));
+
+    std::vector<int> active = sample;
+    PlaneCandidate best;
+    PlaneCandidate largest;
+    for (int candidate = 0; candidate < config.planeCandidates && active.size() >= 3;
+         ++candidate) {
+        if (stopped(hooks))
+            return {};
+        Plane ransacBest;
+        int bestCount = 0;
+        int bestIteration = std::numeric_limits<int>::max();
+        const int iterations = config.planeIterations;
+#ifdef BWB_HAS_OPENMP
+#pragma omp parallel
+#endif
+        {
+            int localCount = 0;
+            int localIteration = std::numeric_limits<int>::max();
+            Plane localPlane;
+#ifdef BWB_HAS_OPENMP
+#pragma omp for schedule(static)
+#endif
+            for (int iteration = 0; iteration < iterations; ++iteration) {
+                // 每次迭代只由 candidate/iteration 决定采样，与线程调度无关。
+                const std::uint64_t seed =
+                    std::uint64_t(candidate + 1) * 0xB0B2026ULL + std::uint64_t(iteration);
+                const auto pick = [&](std::uint64_t salt) {
+                    return std::size_t(mix(seed + salt) % active.size());
+                };
+                const Vec3 a = points[std::size_t(active[pick(0)])].xyz;
+                const Vec3 b = points[std::size_t(active[pick(1)])].xyz;
+                const Vec3 c = points[std::size_t(active[pick(2)])].xyz;
+                Vec3 normal = (b - a).cross(c - a);
+                const double norm = normal.norm();
+                if (norm <= kEpsilon)
+                    continue;
+                normal /= norm;
+                const double d = -normal.dot(a);
+                int count = 0;
+                for (int index : active)
+                    if (std::abs(normal.dot(points[std::size_t(index)].xyz) + d) <=
+                        config.planeDistance)
+                        ++count;
+                if (count > localCount || (count == localCount && iteration < localIteration)) {
+                    localCount = count;
+                    localIteration = iteration;
+                    localPlane.normal = normal;
+                    localPlane.origin = a;
+                    localPlane.d = d;
+                }
+            }
+#ifdef BWB_HAS_OPENMP
+#pragma omp critical
+#endif
+            {
+                if (localCount > bestCount ||
+                    (localCount == bestCount && localIteration < bestIteration)) {
+                    bestCount = localCount;
+                    bestIteration = localIteration;
+                    ransacBest = localPlane;
+                }
+            }
+        }
+        if (bestCount < 3)
+            break;
+        std::vector<int> sampleInliers;
+        sampleInliers.reserve(std::size_t(bestCount));
+        for (int index : active)
+            if (std::abs(ransacBest.normal.dot(points[std::size_t(index)].xyz) +
+                         ransacBest.d) <= config.planeDistance)
+                sampleInliers.push_back(index);
+        Plane refined = fitPlane(points, sampleInliers, ransacBest);
+        auto full = inliers(points, refined, config.planeDistance);
+        refined = fitPlane(points, full, refined);
+        full = inliers(points, refined, config.planeDistance);
+
+        std::size_t positive = 0, negative = 0, shoulder = 0;
+        double squaredError = 0.0;
+        const double exclusion = config.planeDistance * 1.5;
+#ifdef BWB_HAS_OPENMP
+#pragma omp parallel for reduction(+ : positive, negative, shoulder, squaredError) schedule(static)
+#endif
+        for (long long i = 0; i < static_cast<long long>(points.size()); ++i) {
+            if (!finite(points[std::size_t(i)].xyz))
+                continue;
+            const double distance =
+                refined.normal.dot(points[std::size_t(i)].xyz) + refined.d;
+            positive += distance > exclusion ? 1u : 0u;
+            negative += distance < -exclusion ? 1u : 0u;
+            const double absoluteDistance = std::abs(distance);
+            if (absoluteDistance <= config.planeDistance)
+                squaredError += distance * distance;
+            else if (absoluteDistance <= config.planeDistance * 3.0)
+                ++shoulder;
+        }
+        const double balance = positive + negative == 0
+                                   ? 0.0
+                                   : 2.0 * double(std::min(positive, negative)) /
+                                         double(positive + negative);
+        PlaneCandidate evaluated;
+        evaluated.plane = refined;
+        evaluated.fullInliers = std::move(full);
+        // 核心带宽 2t，外侧两肩总带宽 4t。扣除按带宽折算的背景点数，避免
+        // 将斜穿曲面/体点云、仅因正负侧均衡而得分很高的平面误当真实 A 面。
+        const double peakSupport = std::max(0.0,
+            double(evaluated.fullInliers.size()) - 0.5 * double(shoulder));
+        evaluated.score = peakSupport * (0.10 + balance * balance);
+        if (hooks.referenceCandidate)
+            hooks.referenceCandidate(refined, evaluated.fullInliers.size(), positive,
+                                     negative, evaluated.score,
+                                     std::sqrt(squaredError /
+                                         std::max(1.0, double(evaluated.fullInliers.size()))),
+                                     peakSupport);
+        if (evaluated.fullInliers.size() > largest.fullInliers.size())
+            largest = evaluated;
+        if (balance >= 0.04 && evaluated.score > best.score)
+            best = evaluated;
+
+        std::vector<int> remaining;
+        remaining.reserve(active.size() - sampleInliers.size());
+        for (int index : active)
+            if (std::abs(refined.normal.dot(points[std::size_t(index)].xyz) + refined.d) >
+                config.planeDistance * 1.5)
+                remaining.push_back(index);
+        active.swap(remaining);
+    }
+    return best.score >= 0 ? best : largest;
+}
+
+std::pair<Vec3, Vec3> planeBasis(const Vec3 &normal) {
+    const Vec3 helper = std::abs(normal.z()) < 0.85 ? Vec3::UnitZ() : Vec3::UnitY();
+    const Vec3 u = normal.cross(helper).normalized();
+    return {u, normal.cross(u).normalized()};
+}
+
+double normalAngleDegrees(const Vec3 &left, const Vec3 &right) {
+    const double cosine = std::max(-1.0, std::min(1.0, left.dot(right)));
+    return std::acos(cosine) * kRadiansToDegrees;
+}
+
+struct ReferenceModel {
+    Vec3 origin = Vec3::Zero();
+    Vec3 longitudinal = Vec3::UnitX();
+    Vec3 transverse = Vec3::UnitY();
+    Vec3 depth = Vec3::UnitZ();
+    std::vector<ReferenceSegment> segments;
+};
+
+double longitudinalCoordinate(const ReferenceModel &model, const Vec3 &point) {
+    return model.longitudinal.dot(point - model.origin);
+}
+
+std::size_t referenceSegmentIndex(const ReferenceModel &model, const Vec3 &point) {
+    const double coordinate = longitudinalCoordinate(model, point);
+    if (model.segments.size() <= 1)
+        return 0;
+    auto found = std::lower_bound(
+        model.segments.begin(), model.segments.end(), coordinate,
+        [](const ReferenceSegment &segment, double value) {
+            return segment.longitudinalMax < value;
+        });
+    if (found == model.segments.end())
+        return model.segments.size() - 1;
+    return std::size_t(found - model.segments.begin());
+}
+
+const Plane &localPlane(const ReferenceModel &model, const Vec3 &point) {
+    return model.segments[referenceSegmentIndex(model, point)].plane;
+}
+
+double signedReferenceDistance(const ReferenceModel &model, const Vec3 &point) {
+    const auto &plane = localPlane(model, point);
+    return plane.normal.dot(point) + plane.d;
+}
+
+Vec3 projectToReference(const ReferenceModel &model, const Vec3 &point) {
+    const auto &plane = localPlane(model, point);
+    return point - (plane.normal.dot(point) + plane.d) * plane.normal;
+}
+
+Eigen::Vector2d flattenReference(const ReferenceModel &model, const Vec3 &point) {
+    const Vec3 delta = point - model.origin;
+    return {model.longitudinal.dot(delta), model.transverse.dot(delta)};
+}
+
+Vec3 liftToReference(const ReferenceModel &model, const Eigen::Vector2d &coordinate) {
+    Vec3 point = model.origin + model.longitudinal * coordinate.x() +
+                 model.transverse * coordinate.y();
+    const auto &plane = localPlane(model, point);
+    const double denominator = plane.normal.dot(model.depth);
+    if (std::abs(denominator) > 1e-8)
+        point -= model.depth * ((plane.normal.dot(point) + plane.d) / denominator);
+    else
+        point -= plane.normal * (plane.normal.dot(point) + plane.d);
+    return point;
+}
+
+std::vector<int> domainInliers(const std::vector<Point> &points,
+                               const std::vector<int> &domain, const Plane &plane,
+                               double threshold) {
+    std::vector<int> result;
+    result.reserve(domain.size() / 4);
+    for (int index : domain) {
+        const auto &point = points[std::size_t(index)].xyz;
+        if (finite(point) && std::abs(plane.normal.dot(point) + plane.d) <= threshold)
+            result.push_back(index);
+    }
+    return result;
+}
+
+PlaneCandidate detectLocalReference(const std::vector<Point> &points,
+                                    const std::vector<int> &domain,
+                                    const Config &config, const Plane &expected,
+                                    int segmentIndex) {
+    PlaneCandidate best;
+    if (domain.size() < 3)
+        return best;
+    const std::size_t maximumSample = std::max<std::size_t>(
+        500, std::size_t(config.maxRansacPoints) /
+                 std::max<std::size_t>(1, std::size_t(std::ceil(
+                     double(points.size()) / double(domain.size())))));
+    const std::size_t stride = std::max<std::size_t>(1, domain.size() / maximumSample);
+    std::vector<int> sample;
+    sample.reserve(std::min(domain.size(), maximumSample));
+    for (std::size_t i = 0; i < domain.size(); i += stride)
+        sample.push_back(domain[i]);
+
+    const int iterations = std::max(100, config.planeIterations / 2);
+    // expected 来自全局 A 面种子或已经建立的相邻局部 A 面。超过连续性上限的
+    // 候选即使内点更多，也不能作为下一段 A 面；否则位于工件首尾的干扰平面
+    // 没有两侧邻段可供事后识别，会直接形成错误的 A1 或 An。搜索角至少保留
+    // 5 度，使非常严格的质量阈值仍能在后续连续性检查中报告真实变化。
+    const double maximumSearchAngleDegrees =
+        std::max(5.0, config.maxAdjacentNormalAngleDegrees);
+    const double minimumAlignment =
+        std::cos(maximumSearchAngleDegrees / kRadiansToDegrees);
+    double bestScore = 0.0;
+    int bestIteration = std::numeric_limits<int>::max();
+    Plane ransacBest = expected;
+#ifdef BWB_HAS_OPENMP
+#pragma omp parallel
+#endif
+    {
+        double localScore = 0.0;
+        int localIteration = std::numeric_limits<int>::max();
+        Plane localBest = expected;
+#ifdef BWB_HAS_OPENMP
+#pragma omp for schedule(static)
+#endif
+        for (int iteration = 0; iteration < iterations; ++iteration) {
+            const std::uint64_t seed =
+                std::uint64_t(segmentIndex + 1) * 0x51A7E2026ULL +
+                std::uint64_t(iteration);
+            const auto pick = [&](std::uint64_t salt) {
+                return std::size_t(mix(seed + salt) % sample.size());
+            };
+            const Vec3 a = points[std::size_t(sample[pick(0)])].xyz;
+            const Vec3 b = points[std::size_t(sample[pick(1)])].xyz;
+            const Vec3 c = points[std::size_t(sample[pick(2)])].xyz;
+            Vec3 normal = (b - a).cross(c - a);
+            const double norm = normal.norm();
+            if (norm <= kEpsilon)
+                continue;
+            normal /= norm;
+            double alignment = normal.dot(expected.normal);
+            if (alignment < 0.0) {
+                normal = -normal;
+                alignment = -alignment;
+            }
+            if (alignment < minimumAlignment)
+                continue;
+            const double d = -normal.dot(a);
+            int count = 0;
+            int positive = 0, negative = 0;
+            const double exclusion = config.planeDistance * 1.5;
+            for (int index : sample) {
+                const double distance =
+                    normal.dot(points[std::size_t(index)].xyz) + d;
+                if (std::abs(distance) <= config.planeDistance)
+                    ++count;
+                positive += distance > exclusion ? 1 : 0;
+                negative += distance < -exclusion ? 1 : 0;
+            }
+            const double balance = positive + negative == 0
+                                       ? 0.0
+                                       : 2.0 * double(std::min(positive, negative)) /
+                                             double(positive + negative);
+            // 局部 A 面也必须延续全局 A 面“把工件分到两侧”的语义。
+            // 仅按内点数会把 121.txt 前部更密集的外表面误选为 A1/A2。
+            const double score = double(count) * alignment * alignment *
+                                 (0.10 + balance * balance);
+            if (score > localScore ||
+                (score == localScore && iteration < localIteration)) {
+                localScore = score;
+                localIteration = iteration;
+                localBest = {normal, a, d};
+            }
+        }
+#ifdef BWB_HAS_OPENMP
+#pragma omp critical
+#endif
+        {
+            if (localScore > bestScore ||
+                (localScore == bestScore && localIteration < bestIteration)) {
+                bestScore = localScore;
+                bestIteration = localIteration;
+                ransacBest = localBest;
+            }
+        }
+    }
+    // 随机三点不保证命中已知 A 面，尤其是端部宽度较小或采样顺序偏置时。
+    // 将传播来的 A 面作为显式候选，在本段实测点上收敛，再与随机候选使用
+    // 同一全量点评分比较。expected 只是初值，输出仍是本段独立拟合的平面。
+    auto evaluate = [&](Plane candidate, double initialThreshold) {
+        for (int refinement = 0; refinement < 5; ++refinement) {
+            const auto support = domainInliers(points, domain, candidate,
+                refinement == 0 ? initialThreshold : config.planeDistance);
+            if (support.size() < 3)
+                return;
+            candidate = fitPlane(points, support, candidate);
+        }
+        const double alignment = candidate.normal.dot(expected.normal);
+        if (alignment < minimumAlignment)
+            return;
+        auto full = domainInliers(points, domain, candidate, config.planeDistance);
+        std::size_t positive = 0, negative = 0, shoulder = 0;
+        for (int index : domain) {
+            const double distance = candidate.normal.dot(points[std::size_t(index)].xyz) +
+                                    candidate.d;
+            positive += distance > config.planeDistance * 1.5 ? 1u : 0u;
+            negative += distance < -config.planeDistance * 1.5 ? 1u : 0u;
+            if (std::abs(distance) > config.planeDistance &&
+                std::abs(distance) <= config.planeDistance * 3.0)
+                ++shoulder;
+        }
+        const double balance = positive + negative == 0 ? 0.0 :
+            2.0 * double(std::min(positive, negative)) / double(positive + negative);
+        const double peakSupport = std::max(0.0, double(full.size()) - 0.5 * double(shoulder));
+        const double score = peakSupport * alignment * alignment *
+                             (0.10 + balance * balance);
+        if (score > best.score) {
+            best.plane = candidate;
+            best.fullInliers = std::move(full);
+            best.score = score;
+        }
+    };
+    if (bestScore > 0.0)
+        evaluate(ransacBest, config.planeDistance);
+    evaluate(expected, config.planeDistance * 2.0);
+    return best;
+}
+
+ReferenceModel buildReferenceModel(const std::vector<Point> &points,
+                                   const PlaneCandidate &seed,
+                                   const Config &config, const Hooks &hooks) {
+    ReferenceModel model;
+    model.origin = seed.plane.origin;
+    model.depth = seed.plane.normal;
+    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+    Vec3 mean = Vec3::Zero();
+    for (int index : seed.fullInliers)
+        mean += points[std::size_t(index)].xyz;
+    if (!seed.fullInliers.empty())
+        mean /= double(seed.fullInliers.size());
+    for (int index : seed.fullInliers) {
+        const Vec3 delta = points[std::size_t(index)].xyz - mean;
+        covariance.noalias() += delta * delta.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+    Vec3 axis = solver.info() == Eigen::Success ? solver.eigenvectors().col(2)
+                                                : planeBasis(seed.plane.normal).first;
+    axis -= seed.plane.normal * seed.plane.normal.dot(axis);
+    if (axis.squaredNorm() <= kEpsilon)
+        axis = planeBasis(seed.plane.normal).first;
+    model.longitudinal = axis.normalized();
+    Eigen::Index dominant = 0;
+    model.longitudinal.cwiseAbs().maxCoeff(&dominant);
+    if (model.longitudinal[dominant] < 0.0)
+        model.longitudinal = -model.longitudinal;
+    model.transverse = model.depth.cross(model.longitudinal).normalized();
+
+    std::vector<double> coordinates;
+    coordinates.reserve(points.size());
+    for (const auto &point : points)
+        if (finite(point.xyz))
+            coordinates.push_back(longitudinalCoordinate(model, point.xyz));
+    if (coordinates.empty())
+        return model;
+    const double low = quantile(coordinates, 0.005);
+    const double high = quantile(coordinates, 0.995);
+    const double totalLength = std::max(kEpsilon, high - low);
+    const int count = std::max(1, std::min(
+        128, int(std::ceil(totalLength / config.referenceSegmentLength))));
+    const double width = totalLength / double(count);
+    const int seedIndex = std::max(0, std::min(
+        count - 1, int(std::floor((longitudinalCoordinate(model, seed.plane.origin) - low) /
+                                  width))));
+    model.segments.resize(std::size_t(count));
+    std::vector<unsigned char> ready(std::size_t(count), 0);
+    const double overlap = std::min(width * 0.15, config.referenceSegmentLength * 0.1);
+
+    auto fitSegment = [&](int index, const Plane &expected) {
+        ReferenceSegment segment;
+        segment.longitudinalMin = low + width * index;
+        segment.longitudinalMax = index + 1 == count ? high : low + width * (index + 1);
+        std::vector<int> domain;
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if (!finite(points[i].xyz))
+                continue;
+            const double coordinate = longitudinalCoordinate(model, points[i].xyz);
+            if (coordinate >= segment.longitudinalMin - overlap &&
+                coordinate <= segment.longitudinalMax + overlap)
+                domain.push_back(int(i));
+        }
+        const auto detected = detectLocalReference(points, domain, config, expected, index);
+        const std::size_t localMinimum = std::size_t(std::max(
+            20, std::min(config.minPlanePoints, int(domain.size() / 20))));
+        segment.locallyFitted = detected.fullInliers.size() >= localMinimum;
+        segment.plane = segment.locallyFitted ? detected.plane : expected;
+        segment.localLongitudinal =
+            model.longitudinal - segment.plane.normal *
+                                     segment.plane.normal.dot(model.longitudinal);
+        if (segment.localLongitudinal.squaredNorm() <= kEpsilon)
+            segment.localLongitudinal = planeBasis(segment.plane.normal).first;
+        segment.localLongitudinal.normalize();
+        if (segment.localLongitudinal.dot(model.longitudinal) < 0.0)
+            segment.localLongitudinal = -segment.localLongitudinal;
+        segment.localTransverse =
+            segment.plane.normal.cross(segment.localLongitudinal).normalized();
+        for (int pointIndex : domain) {
+            const auto &point = points[std::size_t(pointIndex)].xyz;
+            const double coordinate = longitudinalCoordinate(model, point);
+            const bool inCore = coordinate >= segment.longitudinalMin &&
+                                (index + 1 == count
+                                     ? coordinate <= segment.longitudinalMax
+                                     : coordinate < segment.longitudinalMax);
+            if (inCore && std::abs(segment.plane.normal.dot(point) + segment.plane.d) <=
+                              config.planeDistance)
+                segment.indices.push_back(pointIndex);
+        }
+        if (!segment.indices.empty()) {
+            double squaredError = 0.0;
+            for (int pointIndex : segment.indices) {
+                const double distance = segment.plane.normal.dot(
+                                            points[std::size_t(pointIndex)].xyz) +
+                                        segment.plane.d;
+                squaredError += distance * distance;
+            }
+            segment.planeRms =
+                std::sqrt(squaredError / double(segment.indices.size()));
+        }
+        model.segments[std::size_t(index)] = std::move(segment);
+        ready[std::size_t(index)] = 1;
+    };
+
+    fitSegment(seedIndex, seed.plane);
+    for (int index = seedIndex + 1; index < count && !stopped(hooks); ++index)
+        fitSegment(index, model.segments[std::size_t(index - 1)].plane);
+    for (int index = seedIndex - 1; index >= 0 && !stopped(hooks); --index)
+        fitSegment(index, model.segments[std::size_t(index + 1)].plane);
+    for (int index = 0; index < count; ++index)
+        if (!ready[std::size_t(index)])
+            fitSegment(index, seed.plane);
+
+    auto guidedRefit = [&](int index, const Plane &predicted) {
+        auto &current = model.segments[std::size_t(index)];
+        std::vector<int> domain;
+        for (std::size_t pointIndex = 0; pointIndex < points.size(); ++pointIndex) {
+            if (!finite(points[pointIndex].xyz))
+                continue;
+            const double coordinate =
+                longitudinalCoordinate(model, points[pointIndex].xyz);
+            if (coordinate >= current.longitudinalMin - overlap &&
+                coordinate <= current.longitudinalMax + overlap)
+                domain.push_back(int(pointIndex));
+        }
+        const std::size_t localMinimum = std::size_t(std::max(
+            20, std::min(config.minPlanePoints, int(domain.size() / 20))));
+        auto support = domainInliers(points, domain, predicted,
+                                     config.planeDistance * 2.0);
+        if (support.size() < localMinimum)
+            return false;
+        Plane refined = fitPlane(points, support, predicted);
+        if (refined.normal.dot(predicted.normal) < 0.0) {
+            refined.normal = -refined.normal;
+            refined.d = -refined.d;
+        }
+        support = domainInliers(points, domain, refined, config.planeDistance);
+        if (support.size() < localMinimum)
+            return false;
+        refined = fitPlane(points, support, refined);
+        if (refined.normal.dot(predicted.normal) < 0.0) {
+            refined.normal = -refined.normal;
+            refined.d = -refined.d;
+        }
+
+        ReferenceSegment candidate = current;
+        candidate.plane = refined;
+        candidate.locallyFitted = true;
+        candidate.indices.clear();
+        candidate.localLongitudinal =
+            model.longitudinal - refined.normal * refined.normal.dot(model.longitudinal);
+        if (candidate.localLongitudinal.squaredNorm() <= kEpsilon)
+            return false;
+        candidate.localLongitudinal.normalize();
+        if (candidate.localLongitudinal.dot(model.longitudinal) < 0.0)
+            candidate.localLongitudinal = -candidate.localLongitudinal;
+        candidate.localTransverse =
+            refined.normal.cross(candidate.localLongitudinal).normalized();
+        double squaredError = 0.0;
+        for (int pointIndex : domain) {
+            const Vec3 &point = points[std::size_t(pointIndex)].xyz;
+            const double coordinate = longitudinalCoordinate(model, point);
+            const bool inCore = coordinate >= candidate.longitudinalMin &&
+                                (index + 1 == count
+                                     ? coordinate <= candidate.longitudinalMax
+                                     : coordinate < candidate.longitudinalMax);
+            const double distance = refined.normal.dot(point) + refined.d;
+            if (inCore && std::abs(distance) <= config.planeDistance) {
+                candidate.indices.push_back(pointIndex);
+                squaredError += distance * distance;
+            }
+        }
+        if (candidate.indices.size() < localMinimum)
+            return false;
+        candidate.planeRms =
+            std::sqrt(squaredError / double(candidate.indices.size()));
+
+        const double oldPredictionError =
+            normalAngleDegrees(current.plane.normal, predicted.normal);
+        const double newPredictionError =
+            normalAngleDegrees(candidate.plane.normal, predicted.normal);
+        if (newPredictionError + 0.25 >= oldPredictionError)
+            return false;
+        current = std::move(candidate);
+        return true;
+    };
+
+    // 识别“跳到另一平面若干段后又跳回来”的连续错面块。单点异常检查无法
+    // 发现两个相邻区段同时选到同一个干扰平面，而这种模式在真实 121.txt 和
+    // 局部密集平面合成回归中都会出现。
+    const double jumpAngle =
+        std::min(5.0, config.maxAdjacentNormalAngleDegrees / 3.0);
+    std::vector<int> jumps;
+    for (int index = 1; index < count; ++index)
+        if (normalAngleDegrees(
+                model.segments[std::size_t(index - 1)].plane.normal,
+                model.segments[std::size_t(index)].plane.normal) > jumpAngle)
+            jumps.push_back(index);
+    for (std::size_t jump = 1; jump < jumps.size(); ++jump) {
+        const int first = jumps[jump - 1];
+        const int afterLast = jumps[jump];
+        const auto &left = model.segments[std::size_t(first - 1)];
+        const auto &right = model.segments[std::size_t(afterLast)];
+        if (normalAngleDegrees(left.plane.normal, right.plane.normal) > jumpAngle)
+            continue;
+        for (int index = first; index < afterLast; ++index) {
+            const double ratio = double(index - first + 1) /
+                                 double(afterLast - first + 1);
+            Plane predicted;
+            predicted.normal =
+                ((1.0 - ratio) * left.plane.normal + ratio * right.plane.normal)
+                    .normalized();
+            predicted.origin =
+                (1.0 - ratio) * left.plane.origin + ratio * right.plane.origin;
+            predicted.d = -predicted.normal.dot(predicted.origin);
+            guidedRefit(index, predicted);
+        }
+    }
+
+    // 局部点数最多的平面不一定是 A 面。若一个内段同时偏离左右邻段，而左右
+    // 邻段彼此一致，并且该段支持量或 RMS 也异常，则用两侧预测面引导一次独立
+    // 局部重拟合。重拟合仍只使用本长度区段附近的实测点，不复制邻段平面。
+    for (int index = 1; index + 1 < count; ++index) {
+        const auto &left = model.segments[std::size_t(index - 1)];
+        const auto &middle = model.segments[std::size_t(index)];
+        const auto &right = model.segments[std::size_t(index + 1)];
+        const double neighborAngle =
+            normalAngleDegrees(left.plane.normal, right.plane.normal);
+        const double middleAngle = std::max(
+            normalAngleDegrees(left.plane.normal, middle.plane.normal),
+            normalAngleDegrees(middle.plane.normal, right.plane.normal));
+        const bool isolatedDirection =
+            neighborAngle <= std::min(5.0, config.maxAdjacentNormalAngleDegrees / 3.0) &&
+            middleAngle > std::max(2.0, neighborAngle * 3.0 + 0.5);
+        const bool weakSupport = middle.indices.size() * 4 <
+                                 std::min(left.indices.size(), right.indices.size()) * 3;
+        const bool highResidual =
+            middle.planeRms > std::max(left.planeRms, right.planeRms) * 1.5;
+        if (!isolatedDirection || (!weakSupport && !highResidual))
+            continue;
+        Plane predicted;
+        predicted.normal = (left.plane.normal + right.plane.normal).normalized();
+        predicted.origin = 0.5 * (left.plane.origin + right.plane.origin);
+        predicted.d = -predicted.normal.dot(predicted.origin);
+        guidedRefit(index, predicted);
+    }
+    for (std::size_t index = 1; index < model.segments.size(); ++index) {
+        auto &segment = model.segments[index];
+        segment.normalChangeFromPreviousDegrees =
+            normalAngleDegrees(model.segments[index - 1].plane.normal,
+                               segment.plane.normal);
+        const auto &previous = model.segments[index - 1].plane;
+        const double leftDenominator = previous.normal.dot(model.depth);
+        const double rightDenominator = segment.plane.normal.dot(model.depth);
+        if (std::abs(leftDenominator) <= 1e-8 ||
+            std::abs(rightDenominator) <= 1e-8)
+            continue;
+        std::vector<double> transverse;
+        const double band = std::max(config.planeDistance * 3.0, width * 0.02);
+        for (const auto &point : points) {
+            if (finite(point.xyz) &&
+                std::abs(longitudinalCoordinate(model, point.xyz) -
+                         segment.longitudinalMin) <= band)
+                transverse.push_back(model.transverse.dot(point.xyz - model.origin));
+        }
+        if (transverse.empty())
+            continue;
+        for (double q : {0.05, 0.50, 0.95}) {
+            const Vec3 anchor = model.origin +
+                model.longitudinal * segment.longitudinalMin +
+                model.transverse * quantile(transverse, q);
+            const double left = -(previous.normal.dot(anchor) + previous.d) /
+                                leftDenominator;
+            const double right = -(segment.plane.normal.dot(anchor) + segment.plane.d) /
+                                 rightDenominator;
+            segment.boundaryGapFromPrevious =
+                std::max(segment.boundaryGapFromPrevious, std::abs(left - right));
+        }
+        segment.boundaryGapMeasured = true;
+    }
+    return model;
+}
+
+struct Cell {
+    int x = 0, y = 0;
+    bool operator==(const Cell &other) const { return x == other.x && y == other.y; }
+};
+
+struct CellHash {
+    std::size_t operator()(const Cell &value) const noexcept {
+        return (std::size_t(std::uint32_t(value.x)) << 32) ^
+               std::size_t(std::uint32_t(value.y) * 0x9e3779b9u);
+    }
+};
+
+SliceEvaluation evaluateSlice(const std::vector<Point> &points,
+                              const ReferenceModel &reference,
+                              const Config &config, int side, double offset) {
+    SliceEvaluation result;
+    result.side = side;
+    result.offset = offset;
+    const double half = config.sliceThickness * 0.5;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!finite(points[i].xyz))
+            continue;
+        const double signedDistance = signedReferenceDistance(reference, points[i].xyz);
+        if (std::abs(double(side) * signedDistance - offset) <= half)
+            result.raw.push_back(int(i));
+    }
+    if (result.raw.size() < std::size_t(std::max(8, config.minNeighbors + 2)))
+        return result;
+
+    const double cellSize = std::max(config.denoiseRadius, kEpsilon);
+    std::vector<Eigen::Vector2d> xy(result.raw.size());
+    std::vector<Cell> cells(result.raw.size());
+    std::unordered_map<Cell, std::vector<int>, CellHash> grid;
+    grid.reserve(result.raw.size() * 2);
+    for (std::size_t i = 0; i < result.raw.size(); ++i) {
+        xy[i] = flattenReference(reference,
+                                 points[std::size_t(result.raw[i])].xyz);
+        cells[i] = {int(std::floor(xy[i].x() / cellSize)),
+                    int(std::floor(xy[i].y() / cellSize))};
+        grid[cells[i]].push_back(int(i));
+    }
+    std::vector<unsigned char> keep(result.raw.size(), 0);
+    const double radiusSquared = config.denoiseRadius * config.denoiseRadius;
+#ifdef BWB_HAS_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (long long i = 0; i < static_cast<long long>(result.raw.size()); ++i) {
+        int neighbors = 0;
+        for (int dx = -1; dx <= 1 && neighbors < config.minNeighbors; ++dx)
+            for (int dy = -1; dy <= 1 && neighbors < config.minNeighbors; ++dy) {
+                const auto found = grid.find({cells[std::size_t(i)].x + dx,
+                                              cells[std::size_t(i)].y + dy});
+                if (found == grid.end())
+                    continue;
+                for (int other : found->second) {
+                    if (other != i &&
+                        (xy[std::size_t(other)] - xy[std::size_t(i)]).squaredNorm() <=
+                            radiusSquared)
+                        ++neighbors;
+                    if (neighbors >= config.minNeighbors)
+                        break;
+                }
+            }
+        keep[std::size_t(i)] = neighbors >= config.minNeighbors ? 1 : 0;
+    }
+    std::vector<Eigen::Vector2d> filtered2d;
+    filtered2d.reserve(result.raw.size());
+    for (std::size_t i = 0; i < result.raw.size(); ++i)
+        if (keep[i]) {
+            result.filtered.push_back(result.raw[i]);
+            filtered2d.push_back(xy[i]);
+        }
+    if (filtered2d.size() < 8)
+        return result;
+
+    Eigen::Vector2d mean = Eigen::Vector2d::Zero();
+    for (const auto &point : filtered2d)
+        mean += point;
+    mean /= double(filtered2d.size());
+    Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero();
+    for (const auto &point : filtered2d) {
+        const auto delta = point - mean;
+        covariance.noalias() += delta * delta.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(covariance);
+    if (solver.info() != Eigen::Success)
+        return result;
+    const Eigen::Vector2d axis = solver.eigenvectors().col(1).normalized();
+    const Eigen::Vector2d cross(-axis.y(), axis.x());
+    std::vector<double> longitudinal, residual;
+    longitudinal.reserve(filtered2d.size());
+    residual.reserve(filtered2d.size());
+    for (const auto &point : filtered2d) {
+        const auto delta = point - mean;
+        longitudinal.push_back(axis.dot(delta));
+        residual.push_back(std::abs(cross.dot(delta)));
+    }
+    const double low = quantile(longitudinal, 0.01);
+    const double high = quantile(longitudinal, 0.99);
+    result.length = std::max(0.0, high - low);
+    result.deviation = quantile(residual, 0.90);
+    const auto eigenvalues = solver.eigenvalues();
+    result.linearityRatio = eigenvalues.sum() <= kEpsilon
+                                ? 0.0
+                                : eigenvalues[0] / eigenvalues.sum();
+    constexpr int bins = 100;
+    std::array<unsigned char, bins> occupied{};
+    if (result.length > kEpsilon)
+        for (double value : longitudinal) {
+            const int bin = std::max(0, std::min(bins - 1,
+                int(std::floor((value - low) / result.length * bins))));
+            if (value >= low && value <= high)
+                occupied[std::size_t(bin)] = 1;
+        }
+    const int occupiedCount = std::accumulate(occupied.begin(), occupied.end(), 0);
+    int longestRun = 0, run = 0;
+    for (unsigned char value : occupied) {
+        run = value ? run + 1 : 0;
+        longestRun = std::max(longestRun, run);
+    }
+    result.completeness = 0.5 * double(occupiedCount) / bins +
+                          0.5 * double(longestRun) / bins;
+    result.bent = result.deviation >= config.bendDeviation &&
+                  result.linearityRatio >= 0.0003;
+    result.score = result.length * (0.25 + 0.75 * result.completeness) *
+                   std::log1p(double(result.filtered.size()));
+    return result;
+}
+
+std::vector<ProjectedPoint> project(const std::vector<Point> &points,
+                                    const ReferenceModel &reference,
+                                    const std::vector<int> &indices) {
+    std::vector<ProjectedPoint> result(indices.size());
+#ifdef BWB_HAS_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (long long i = 0; i < static_cast<long long>(indices.size()); ++i) {
+        const Point &source = points[std::size_t(indices[std::size_t(i)])];
+        result[std::size_t(i)] = {projectToReference(reference, source.xyz), source.source};
+    }
+    return result;
+}
+
+std::vector<ProjectedPoint> uniformTrajectory(const std::vector<ProjectedPoint> &points,
+                                              const ReferenceModel &reference,
+                                              double spacing) {
+    if (points.size() < 3)
+        return {};
+    std::vector<Eigen::Vector2d> xy;
+    xy.reserve(points.size());
+    Eigen::Vector2d mean = Eigen::Vector2d::Zero();
+    for (const auto &point : points) {
+        xy.push_back(flattenReference(reference, point.xyz));
+        mean += xy.back();
+    }
+    mean /= double(xy.size());
+    Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero();
+    for (const auto &point : xy) {
+        const auto delta = point - mean;
+        covariance.noalias() += delta * delta.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(covariance);
+    if (solver.info() != Eigen::Success)
+        return {};
+    Eigen::Vector2d axis = solver.eigenvectors().col(1).normalized();
+    if (axis.x() < 0)
+        axis = -axis;
+    const Eigen::Vector2d cross(-axis.y(), axis.x());
+    std::vector<double> sValues;
+    sValues.reserve(xy.size());
+    for (const auto &point : xy)
+        sValues.push_back(axis.dot(point - mean));
+    const double low = quantile(sValues, 0.005);
+    const double high = quantile(sValues, 0.995);
+    const double binWidth = std::max(spacing * 0.5, 0.25);
+    // 以稳健范围的中心为锚点建立对称分箱。若从 low 单侧起箱，长度轴取反后
+    // 尾部的非整箱余量会落到另一端，导致同一几何多/少一个轨迹点。
+    const double rangeCenter = 0.5 * (low + high);
+    const double halfRange = std::max(0.0, 0.5 * (high - low));
+    const int binRadius = std::max(1, int(std::ceil(halfRange / binWidth)));
+    const int binCount = binRadius * 2 + 1;
+    auto transverse =
+        std::vector<std::vector<double>>(static_cast<std::size_t>(binCount));
+    auto sources =
+        std::vector<std::vector<std::uint32_t>>(static_cast<std::size_t>(binCount));
+    for (std::size_t i = 0; i < xy.size(); ++i) {
+        const double s = sValues[i];
+        const double centered = s - rangeCenter;
+        if (std::abs(centered) > halfRange)
+            continue;
+        const int bin = std::max(
+            0, std::min(binCount - 1,
+                        int(std::lround(centered / binWidth)) + binRadius));
+        transverse[std::size_t(bin)].push_back(cross.dot(xy[i] - mean));
+        sources[std::size_t(bin)].push_back(points[i].source);
+    }
+    struct Center { double s = 0, t = 0; std::uint32_t source = 0; };
+    std::vector<Center> centers;
+    centers.reserve(std::size_t(binCount));
+    for (int bin = 0; bin < binCount; ++bin) {
+        auto &values = transverse[std::size_t(bin)];
+        if (values.empty())
+            continue;
+        auto &sourceValues = sources[std::size_t(bin)];
+        const double median = quantile(values, 0.5);
+        std::size_t representative = 0;
+        for (std::size_t i = 1; i < values.size(); ++i)
+            if (std::abs(values[i] - median) <
+                std::abs(values[representative] - median))
+                representative = i;
+        centers.push_back({rangeCenter + (bin - binRadius) * binWidth, median,
+                           sourceValues[representative]});
+    }
+    if (centers.size() < 2)
+        return {};
+    // 三点中值抑制切片厚度造成的单箱毛刺，不改变持续弯折。
+    std::vector<double> smoothed(centers.size());
+    for (std::size_t i = 0; i < centers.size(); ++i) {
+        std::vector<double> window;
+        for (std::size_t j = i > 0 ? i - 1 : i;
+             j <= std::min(centers.size() - 1, i + 1); ++j)
+            window.push_back(centers[j].t);
+        smoothed[i] = quantile(window, 0.5);
+    }
+    for (std::size_t i = 0; i < centers.size(); ++i)
+        centers[i].t = smoothed[i];
+
+    std::vector<double> cumulative(centers.size(), 0.0);
+    for (std::size_t i = 1; i < centers.size(); ++i) {
+        const Eigen::Vector2d a = mean + axis * centers[i - 1].s + cross * centers[i - 1].t;
+        const Eigen::Vector2d b = mean + axis * centers[i].s + cross * centers[i].t;
+        cumulative[i] = cumulative[i - 1] + (b - a).norm();
+    }
+    if (cumulative.back() < spacing)
+        return {};
+    std::vector<ProjectedPoint> result;
+    // 用完整弧长等分并同时保留两端。若只从“低坐标端”按固定步长起采样，
+    // 长度轴符号翻转后会从另一端起步，余量会让整组轨迹点平移半个间距。
+    const int intervals = std::max(1, int(std::lround(cumulative.back() / spacing)));
+    const int count = intervals + 1;
+    result.reserve(std::size_t(count + 1));
+    std::size_t segment = 1;
+    for (int i = 0; i < count; ++i) {
+        const double target = cumulative.back() * double(i) / double(intervals);
+        while (segment < cumulative.size() - 1 && cumulative[segment] < target)
+            ++segment;
+        const double length = cumulative[segment] - cumulative[segment - 1];
+        const double ratio = length <= kEpsilon ? 0.0 :
+            (target - cumulative[segment - 1]) / length;
+        const double s = centers[segment - 1].s +
+                         ratio * (centers[segment].s - centers[segment - 1].s);
+        const double t = centers[segment - 1].t +
+                         ratio * (centers[segment].t - centers[segment - 1].t);
+        const Eigen::Vector2d coordinate = mean + axis * s + cross * t;
+        const Vec3 xyz = liftToReference(reference, coordinate);
+        result.push_back({xyz, centers[segment - 1].source});
+    }
+    return result;
+}
+
+double pointSegmentDistance(const Vec3 &point, const Vec3 &start, const Vec3 &end) {
+    const Vec3 segment = end - start;
+    const double lengthSquared = segment.squaredNorm();
+    if (lengthSquared <= kEpsilon)
+        return (point - start).norm();
+    const double ratio = std::max(0.0, std::min(1.0,
+        (point - start).dot(segment) / lengthSquared));
+    return (point - (start + ratio * segment)).norm();
+}
+
+std::vector<std::size_t> simplifyPolyline(const std::vector<ProjectedPoint> &points,
+                                          double tolerance) {
+    if (points.size() <= 2) {
+        std::vector<std::size_t> indices(points.size());
+        std::iota(indices.begin(), indices.end(), std::size_t(0));
+        return indices;
+    }
+    std::vector<unsigned char> keep(points.size(), 0);
+    keep.front() = keep.back() = 1;
+    std::vector<std::pair<std::size_t, std::size_t>> stack{{0, points.size() - 1}};
+    while (!stack.empty()) {
+        const auto range = stack.back();
+        stack.pop_back();
+        double maximum = -1.0;
+        std::size_t split = range.first;
+        for (std::size_t i = range.first + 1; i < range.second; ++i) {
+            const double distance = pointSegmentDistance(
+                points[i].xyz, points[range.first].xyz, points[range.second].xyz);
+            if (distance > maximum) {
+                maximum = distance;
+                split = i;
+            }
+        }
+        if (maximum > tolerance && split > range.first && split < range.second) {
+            keep[split] = 1;
+            stack.push_back({range.first, split});
+            stack.push_back({split, range.second});
+        }
+    }
+    std::vector<std::size_t> indices;
+    indices.reserve(points.size());
+    for (std::size_t i = 0; i < points.size(); ++i)
+        if (keep[i])
+            indices.push_back(i);
+    return indices;
+}
+
+std::vector<std::size_t> slopePhaseAnchors(
+    const std::vector<ProjectedPoint> &points, double tolerance) {
+    if (points.size() < 6)
+        return simplifyPolyline(points, tolerance);
+
+    Vec3 mean = Vec3::Zero();
+    for (const auto &point : points)
+        mean += point.xyz;
+    mean /= double(points.size());
+    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+    for (const auto &point : points) {
+        const Vec3 delta = point.xyz - mean;
+        covariance.noalias() += delta * delta.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+    if (solver.info() != Eigen::Success)
+        return simplifyPolyline(points, tolerance);
+    Vec3 longitudinal = solver.eigenvectors().col(2).normalized();
+    if (longitudinal.dot(points.back().xyz - points.front().xyz) < 0.0)
+        longitudinal = -longitudinal;
+    Vec3 transverse = solver.eigenvectors().col(1).normalized();
+
+    std::vector<double> s(points.size()), t(points.size()), spacing;
+    spacing.reserve(points.size() - 1);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const Vec3 delta = points[i].xyz - mean;
+        s[i] = longitudinal.dot(delta);
+        t[i] = transverse.dot(delta);
+        if (i > 0)
+            spacing.push_back((points[i].xyz - points[i - 1].xyz).norm());
+    }
+    const double medianSpacing = std::max(quantile(spacing, 0.5), 1e-6);
+    const int radius = std::max(2, std::min(
+        8, int(std::ceil(tolerance / medianSpacing)) + 1));
+    // 容差越大，越倾向于把小幅斜率视为同一水平段；真实明显坡段仍按正负号分开。
+    const double horizontalSlope = std::max(
+        0.04, std::min(0.18, tolerance / (medianSpacing * 10.0)));
+    std::vector<int> states(points.size(), 0);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const std::size_t first = i > std::size_t(radius) ? i - radius : 0;
+        const std::size_t last = std::min(points.size() - 1, i + std::size_t(radius));
+        const double ds = s[last] - s[first];
+        const double slope = std::abs(ds) <= 1e-9
+                                 ? std::copysign(std::numeric_limits<double>::infinity(),
+                                                 t[last] - t[first])
+                                 : (t[last] - t[first]) / ds;
+        states[i] = slope > horizontalSlope ? 1
+                   : slope < -horizontalSlope ? -1
+                                              : 0;
+    }
+
+    // 三点多数表决抑制单点斜率翻转。
+    auto filteredStates = states;
+    for (std::size_t i = 1; i + 1 < states.size(); ++i) {
+        const int sum = states[i - 1] + states[i] + states[i + 1];
+        filteredStates[i] = sum > 0 ? 1 : sum < 0 ? -1 : 0;
+    }
+    states.swap(filteredStates);
+
+    struct Run { std::size_t first = 0, last = 0; int state = 0; };
+    const auto runsOf = [&](const std::vector<int> &values) {
+        std::vector<Run> runs;
+        std::size_t first = 0;
+        for (std::size_t i = 1; i <= values.size(); ++i) {
+            if (i == values.size() || values[i] != values[first]) {
+                runs.push_back({first, i - 1, values[first]});
+                first = i;
+            }
+        }
+        return runs;
+    };
+    const std::size_t minimumRun = std::size_t(std::max(4, radius * 2));
+    for (int pass = 0; pass < 8; ++pass) {
+        const auto runs = runsOf(states);
+        bool changed = false;
+        for (std::size_t i = 0; i < runs.size(); ++i) {
+            const std::size_t length = runs[i].last - runs[i].first + 1;
+            if (length >= minimumRun || runs.size() == 1)
+                continue;
+            int replacement = runs[i].state;
+            if (i > 0 && i + 1 < runs.size() &&
+                runs[i - 1].state == runs[i + 1].state) {
+                replacement = runs[i - 1].state;
+            } else if (i == 0) {
+                replacement = runs[i + 1].state;
+            } else if (i + 1 == runs.size()) {
+                replacement = runs[i - 1].state;
+            } else {
+                const std::size_t leftLength =
+                    runs[i - 1].last - runs[i - 1].first + 1;
+                const std::size_t rightLength =
+                    runs[i + 1].last - runs[i + 1].first + 1;
+                replacement = leftLength >= rightLength ? runs[i - 1].state
+                                                        : runs[i + 1].state;
+            }
+            std::fill(states.begin() + std::ptrdiff_t(runs[i].first),
+                      states.begin() + std::ptrdiff_t(runs[i].last + 1), replacement);
+            changed = true;
+            break;
+        }
+        if (!changed)
+            break;
+    }
+
+    const auto runs = runsOf(states);
+    std::vector<std::size_t> anchors{0};
+    for (std::size_t i = 1; i < runs.size(); ++i) {
+        const std::size_t right = runs[i].first;
+        const std::size_t left = right - 1;
+        // 状态转换位于相邻两个采样点之间。长度轴反向时“右侧第一个点”会换成
+        // 原来的左点，因此用稳定来源索引选择同一个物理边界点。
+        anchors.push_back(points[left].source <= points[right].source ? left : right);
+    }
+    anchors.push_back(points.size() - 1);
+    anchors.erase(std::unique(anchors.begin(), anchors.end()), anchors.end());
+    return anchors.size() >= 2 ? anchors : simplifyPolyline(points, tolerance);
+}
+
+struct FittedSegment {
+    Vec3 origin = Vec3::Zero();
+    Vec3 direction = Vec3::UnitX();
+};
+
+struct FittedPolyline {
+    std::vector<std::size_t> anchors;
+    std::vector<FittedSegment> segments;
+    std::vector<ProjectedPoint> corners;
+};
+
+Vec3 projectToLine(const Vec3 &point, const FittedSegment &line) {
+    return line.origin + line.direction * line.direction.dot(point - line.origin);
+}
+
+FittedSegment fitStraightLine(const std::vector<ProjectedPoint> &points,
+                              std::size_t first, std::size_t last) {
+    FittedSegment line;
+    for (std::size_t i = first; i <= last; ++i)
+        line.origin += points[i].xyz;
+    line.origin /= double(last - first + 1);
+
+    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+    for (std::size_t i = first; i <= last; ++i) {
+        const Vec3 delta = points[i].xyz - line.origin;
+        covariance.noalias() += delta * delta.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+    const Vec3 chord = points[last].xyz - points[first].xyz;
+    if (solver.info() == Eigen::Success)
+        line.direction = solver.eigenvectors().col(2).normalized();
+    else if (chord.squaredNorm() > kEpsilon)
+        line.direction = chord.normalized();
+    if (line.direction.dot(chord) < 0.0)
+        line.direction = -line.direction;
+    return line;
+}
+
+Vec3 fittedCorner(const FittedSegment &left, const FittedSegment &right,
+                  const Vec3 &measuredCorner) {
+    const double parallel = left.direction.dot(right.direction);
+    const double denominator = 1.0 - parallel * parallel;
+    if (denominator <= 1e-8) {
+        return 0.5 * (projectToLine(measuredCorner, left) +
+                      projectToLine(measuredCorner, right));
+    }
+
+    const Vec3 between = left.origin - right.origin;
+    const double leftOffset = left.direction.dot(between);
+    const double rightOffset = right.direction.dot(between);
+    const double leftParameter =
+        (parallel * rightOffset - leftOffset) / denominator;
+    const double rightParameter =
+        (rightOffset - parallel * leftOffset) / denominator;
+    const Vec3 onLeft = left.origin + leftParameter * left.direction;
+    const Vec3 onRight = right.origin + rightParameter * right.direction;
+    return 0.5 * (onLeft + onRight);
+}
+
+FittedPolyline fitPolyline(const std::vector<ProjectedPoint> &points,
+                           double tolerance) {
+    FittedPolyline fitted;
+    if (points.size() < 2)
+        return fitted;
+    fitted.anchors = slopePhaseAnchors(points, tolerance);
+    if (fitted.anchors.size() < 2)
+        return fitted;
+
+    // RDP 只负责确定完整直线区段；每个区段只使用全部实测点拟合一次。
+    fitted.segments.reserve(fitted.anchors.size() - 1);
+    for (std::size_t i = 1; i < fitted.anchors.size(); ++i)
+        fitted.segments.push_back(
+            fitStraightLine(points, fitted.anchors[i - 1], fitted.anchors[i]));
+
+    fitted.corners.reserve(fitted.anchors.size());
+    fitted.corners.push_back(
+        {projectToLine(points.front().xyz, fitted.segments.front()),
+         points.front().source, true});
+    for (std::size_t i = 1; i + 1 < fitted.anchors.size(); ++i) {
+        const auto &measured = points[fitted.anchors[i]];
+        fitted.corners.push_back(
+            {fittedCorner(fitted.segments[i - 1], fitted.segments[i], measured.xyz),
+             measured.source, true});
+    }
+    fitted.corners.push_back(
+        {projectToLine(points.back().xyz, fitted.segments.back()),
+         points.back().source, true});
+    return fitted;
+}
+
+std::vector<ProjectedPoint> projectMeasuredPoints(
+    const std::vector<ProjectedPoint> &measured, const FittedPolyline &line,
+    double requestedSpacing) {
+    if (line.corners.size() < 2 || line.anchors.size() != line.corners.size())
+        return {};
+    std::vector<ProjectedPoint> result;
+    auto first = line.corners.front();
+    first.corner = true;
+    result.push_back(first);
+    for (std::size_t segment = 0; segment < line.segments.size(); ++segment) {
+        const Vec3 start = line.corners[segment].xyz;
+        const Vec3 delta = line.corners[segment + 1].xyz - start;
+        const double length = delta.norm();
+        if (length <= kEpsilon)
+            continue;
+        const Vec3 direction = delta / length;
+        const int intervals = std::max(1, int(std::lround(length / requestedSpacing)));
+        std::size_t lastSelected = line.anchors[segment];
+        for (int interval = 1; interval < intervals; ++interval) {
+            const double target = length * double(interval) / intervals;
+            std::size_t best = measured.size();
+            double bestError = std::numeric_limits<double>::infinity();
+            for (std::size_t i = lastSelected + 1; i < line.anchors[segment + 1]; ++i) {
+                const Vec3 projected = start +
+                    direction * direction.dot(measured[i].xyz - start);
+                const double parameter = direction.dot(projected - start);
+                if (parameter <= 0.0 || parameter >= length)
+                    continue;
+                const double error = std::abs(parameter - target);
+                if (error < bestError) {
+                    best = i;
+                    bestError = error;
+                }
+            }
+            if (best == measured.size())
+                continue;
+            const Vec3 projected = start +
+                direction * direction.dot(measured[best].xyz - start);
+            result.push_back({projected, measured[best].source, false});
+            lastSelected = best;
+        }
+        // 转折点来自相邻整段拟合线的交点，必须原样进入白点序列。
+        result.push_back(line.corners[segment + 1]);
+    }
+    return result;
+}
+
+} // namespace
+
+std::string validateConfig(const Config &config) {
+    for (double offset : config.sliceOffsets)
+        if (!std::isfinite(offset) || offset <= 0)
+            return "切片偏移必须为正数。";
+    if (!std::isfinite(config.sliceThickness) || config.sliceThickness <= 0)
+        return "切片厚度必须为正数。";
+    if (!std::isfinite(config.planeDistance) || config.planeDistance <= 0 ||
+        !std::isfinite(config.referenceSegmentLength) ||
+        config.referenceSegmentLength <= 0)
+        return "平面距离阈值和局部基准面长度必须为正数。";
+    if (!std::isfinite(config.maxAdjacentNormalAngleDegrees) ||
+        config.maxAdjacentNormalAngleDegrees <= 0.0 ||
+        config.maxAdjacentNormalAngleDegrees >= 90.0)
+        return "相邻局部基准面最大法向变化角必须在 0 到 90 度之间。";
+    if (config.planeIterations < 20 || config.planeCandidates < 1 ||
+        config.maxRansacPoints < 100 || config.minPlanePoints < 3)
+        return "平面提取参数超出有效范围。";
+    if (!std::isfinite(config.denoiseRadius) || config.denoiseRadius <= 0 ||
+        config.minNeighbors < 1)
+        return "去噪半径和邻点数必须为正数。";
+    if (!std::isfinite(config.bendDeviation) || config.bendDeviation <= 0 ||
+        !std::isfinite(config.trajectorySpacing) || config.trajectorySpacing <= 0 ||
+        !std::isfinite(config.lineFitTolerance) || config.lineFitTolerance <= 0 ||
+        !std::isfinite(config.whitePointSpacing) || config.whitePointSpacing <= 0)
+        return "弯折阈值、拟合容差和轨迹点间距必须为正数。";
+    return {};
+}
+
+Result extract(const std::vector<Point> &points, const Config &config, const Hooks &hooks) {
+    Result result;
+    const auto configError = validateConfig(config);
+    if (!configError.empty()) {
+        result.message = configError;
+        return result;
+    }
+    if (points.size() < std::size_t(config.minPlanePoints)) {
+        result.message = "有效点数不足，无法提取基准面。";
+        return result;
+    }
+#ifdef BWB_HAS_OPENMP
+    if (config.threads > 0)
+        omp_set_num_threads(config.threads);
+#endif
+    if (stopped(hooks)) {
+        result.cancelled = true;
+        return result;
+    }
+    reportProgress(hooks, 5);
+    auto reference = detectReference(points, config, hooks);
+    if (stopped(hooks)) {
+        result.cancelled = true;
+        return result;
+    }
+    if (reference.fullInliers.size() < std::size_t(config.minPlanePoints)) {
+        result.message = "没有找到能把点云分成两侧的稳定基准面 A。";
+        return result;
+    }
+    const auto referenceModel = buildReferenceModel(points, reference, config, hooks);
+    if (stopped(hooks)) {
+        result.cancelled = true;
+        return result;
+    }
+    if (referenceModel.segments.empty()) {
+        result.message = "已找到基准面种子，但无法沿长度方向建立局部基准面。";
+        return result;
+    }
+    result.reference = reference.plane;
+    result.referenceOrigin = referenceModel.origin;
+    result.referenceLongitudinal = referenceModel.longitudinal;
+    result.referenceTransverse = referenceModel.transverse;
+    result.referenceSegments = referenceModel.segments;
+    for (const auto &segment : result.referenceSegments)
+        result.referenceIndices.insert(result.referenceIndices.end(),
+                                       segment.indices.begin(), segment.indices.end());
+    if (std::any_of(referenceModel.segments.begin(), referenceModel.segments.end(),
+                    [](const ReferenceSegment &segment) {
+                        return !segment.locallyFitted;
+                    })) {
+        result.message = "至少一个长度区段缺少足够点数，无法独立建立局部基准面 Aᵢ。";
+        return result;
+    }
+    const auto invalidFrame = std::find_if(
+        result.referenceSegments.begin(), result.referenceSegments.end(),
+        [](const ReferenceSegment &segment) {
+            const Vec3 &x = segment.localLongitudinal;
+            const Vec3 &y = segment.localTransverse;
+            const Vec3 &z = segment.plane.normal;
+            return !finite(x) || !finite(y) || !finite(z) ||
+                   std::abs(x.norm() - 1.0) > 1e-8 ||
+                   std::abs(y.norm() - 1.0) > 1e-8 ||
+                   std::abs(z.norm() - 1.0) > 1e-8 ||
+                   std::abs(x.dot(y)) > 1e-8 || std::abs(x.dot(z)) > 1e-8 ||
+                   std::abs(y.dot(z)) > 1e-8 || x.cross(y).dot(z) < 1.0 - 1e-8;
+        });
+    if (invalidFrame != result.referenceSegments.end()) {
+        result.message = "局部基准面的长度轴、横向轴和法向无法组成有效右手正交坐标系。";
+        return result;
+    }
+    const auto abrupt = std::find_if(
+        result.referenceSegments.begin() + 1, result.referenceSegments.end(),
+        [&](const ReferenceSegment &segment) {
+            return segment.normalChangeFromPreviousDegrees >
+                   config.maxAdjacentNormalAngleDegrees;
+        });
+    if (abrupt != result.referenceSegments.end()) {
+        result.message = "相邻局部基准面法向变化过大，不能用平面分段静默展平该工件。";
+        return result;
+    }
+    if (result.referenceIndices.size() < std::size_t(config.minPlanePoints)) {
+        result.message = "局部基准面 A1…An 的有效内点总数不足。";
+        return result;
+    }
+    reportProgress(hooks, 35);
+    if (!stage(hooks, 0, result)) {
+        result.cancelled = true;
+        return result;
+    }
+
+    result.slices.resize(6);
+#ifdef BWB_HAS_OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
+    for (int task = 0; task < 6; ++task) {
+        const int side = task < 3 ? 1 : -1;
+        const int offsetIndex = task % 3;
+        result.slices[std::size_t(task)] = evaluateSlice(
+            points, referenceModel, config, side,
+            config.sliceOffsets[std::size_t(offsetIndex)]);
+    }
+    if (stopped(hooks)) {
+        result.cancelled = true;
+        return result;
+    }
+    reportProgress(hooks, 65);
+    if (!stage(hooks, 1, result)) {
+        result.cancelled = true;
+        return result;
+    }
+
+    // 第 2/3 步：先尝试法向正侧；全为直线时自动转到负侧。两侧都弯折则取证据更完整者。
+    int bestPositive = -1, bestNegative = -1;
+    for (int i = 0; i < 6; ++i) {
+        if (!result.slices[std::size_t(i)].bent)
+            continue;
+        int &best = i < 3 ? bestPositive : bestNegative;
+        if (best < 0 || result.slices[std::size_t(i)].score >
+                            result.slices[std::size_t(best)].score)
+            best = i;
+    }
+    if (bestPositive >= 0 && bestNegative >= 0)
+        result.selectedSlice = result.slices[std::size_t(bestPositive)].score >=
+                                       result.slices[std::size_t(bestNegative)].score
+                                   ? bestPositive
+                                   : bestNegative;
+    else
+        result.selectedSlice = bestPositive >= 0 ? bestPositive : bestNegative;
+    if (result.selectedSlice < 0) {
+        result.message = "基准面两侧的 10/20/30 mm 切片均为长直形态，未找到波纹轨迹。";
+        return result;
+    }
+    result.selectedIndices =
+        result.slices[std::size_t(result.selectedSlice)].filtered;
+    if (!stage(hooks, 2, result)) {
+        result.cancelled = true;
+        return result;
+    }
+    reportProgress(hooks, 78);
+
+    result.projected = project(points, referenceModel, result.selectedIndices);
+    if (!stage(hooks, 3, result)) {
+        result.cancelled = true;
+        return result;
+    }
+    reportProgress(hooks, 88);
+    result.trajectory = uniformTrajectory(result.projected, referenceModel,
+                                           config.trajectorySpacing);
+    if (result.trajectory.size() < 2) {
+        result.message = "候选点 B 已找到，但投影后无法生成连续均匀轨迹。";
+        return result;
+    }
+    const auto fitted = fitPolyline(result.trajectory, config.lineFitTolerance);
+    result.fittedLine = fitted.corners;
+    result.whitePoints = projectMeasuredPoints(result.trajectory, fitted,
+                                               config.whitePointSpacing);
+    if (result.fittedLine.size() < 2 || result.whitePoints.size() < 2) {
+        result.message = "中心轨迹已生成，但无法拟合折线并平均分配白色点。";
+        return result;
+    }
+    result.ok = true;
+    result.message = "每个完整直线区段已整体拟合一次，并将选中的实测轨迹点统一投影到对应直线。";
+    if (!stage(hooks, 4, result)) {
+        result.ok = false;
+        result.cancelled = true;
+        return result;
+    }
+    reportProgress(hooks, 100);
+    return result;
+}
+
+} // namespace bwb

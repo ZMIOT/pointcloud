@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>点云工作台 - Point Cloud Workstation</title>
+<!-- Tailwind CSS v3 CDN -->
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            slate: {
+              850: '#151f32',
+              900: '#0f172a',
+              950: '#090d16',
+            },
+            cyan: {
+              450: '#0ea5e9',
+            }
+          }
+        }
+      }
+    }
+  </script>
+<!-- FontAwesome for icons -->
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"/>
+<style data-purpose="custom-scrollbar">
+    /* Custom Scrollbar for professional dark UI */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen flex flex-col overflow-hidden select-none font-sans">
+<!-- BEGIN: MainHeader -->
+<header class="bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 py-2 text-xs select-none z-20" data-purpose="application-header">
+<div class="flex items-center space-x-6">
+<div class="flex items-center space-x-2 font-semibold text-cyan-400">
+<i class="fa-solid fa-cube text-base"></i>
+<span class="tracking-wide">点云工作台</span>
+</div>
+<!-- Top Menu Dropdowns -->
+<nav class="flex space-x-1 text-slate-300">
+<div class="relative group">
+<button class="px-2.5 py-1 hover:bg-slate-800 rounded transition">文件(F)</button>
+</div>
+<div class="relative group">
+<button class="px-2.5 py-1 hover:bg-slate-800 rounded transition">视图(V)</button>
+</div>
+<div class="relative group">
+<button class="px-2.5 py-1 hover:bg-slate-800 rounded transition">算法(A)</button>
+</div>
+</nav>
+</div>
+<div class="flex items-center space-x-3 text-slate-400">
+<div class="flex items-center space-x-1 bg-slate-800/80 px-2.5 py-1 rounded border border-slate-700/50">
+<span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+<span class="text-slate-300 text-[11px]">引擎就绪</span>
+</div>
+</div>
+</header>
+<!-- END: MainHeader -->
+<!-- BEGIN: QuickToolbar -->
+<section class="bg-slate-900/90 border-b border-slate-800/80 px-4 py-2 flex items-center justify-between shadow-sm z-10" data-purpose="quick-action-toolbar">
+<div class="flex items-center space-x-3">
+<button class="flex items-center space-x-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white px-3.5 py-1.5 rounded-md text-xs font-medium shadow-sm shadow-cyan-950/50 transition border border-cyan-500/30">
+<i class="fa-solid fa-folder-open text-cyan-200"></i>
+<span>导入点云</span>
+</button>
+<button class="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-md text-xs font-medium transition border border-slate-700">
+<i class="fa-solid fa-file-export text-slate-400"></i>
+<span>导出选中点云</span>
+</button>
+<div class="h-4 w-[1px] bg-slate-800"></div>
+<button class="flex items-center space-x-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-md text-xs font-medium transition border border-slate-700">
+<i class="fa-solid fa-expand text-slate-400"></i>
+<span>适应视图</span>
+</button>
+</div>
+<div class="flex items-center space-x-2">
+<label class="flex items-center space-x-2 bg-slate-800/60 px-3 py-1.5 rounded-md border border-slate-700/60 cursor-pointer hover:bg-slate-800 transition">
+<input class="rounded bg-slate-900 border-slate-700 text-cyan-500 focus:ring-0 focus:ring-offset-0 w-3.5 h-3.5" type="checkbox"/>
+<span class="text-xs font-medium text-slate-300">高级模式</span>
+</label>
+</div>
+</section>
+<!-- END: QuickToolbar -->
+<!-- BEGIN: MainWorkspace -->
+<main class="flex-1 flex overflow-hidden relative">
+<!-- BEGIN: LeftSidebar -->
+<aside class="w-72 bg-slate-900/90 border-r border-slate-800 flex flex-col z-10" data-purpose="left-sidebar">
+<!-- Sidebar Header -->
+<div class="p-3 border-b border-slate-800/80 flex items-center justify-between text-xs font-semibold text-slate-300">
+<span class="flex items-center space-x-2">
+<i class="fa-solid fa-layer-group text-cyan-400"></i>
+<span>数据与图层</span>
+</span>
+<div class="space-x-1 text-slate-500">
+<i class="fa-solid fa-minus hover:text-slate-300 cursor-pointer"></i>
+<i class="fa-solid fa-clone hover:text-slate-300 cursor-pointer"></i>
+</div>
+</div>
+<!-- Input & Results Section -->
+<div class="p-3 border-b border-slate-800/60 flex-1 flex flex-col">
+<div class="text-xs font-medium text-slate-400 mb-2 flex items-center justify-between">
+<span>输入与结果</span>
+<span class="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded">0 选中</span>
+</div>
+<p class="text-[11px] text-slate-400 mb-2 leading-relaxed">选中点云，作为下一次运行的输入。</p>
+<!-- Tree View Box -->
+<div class="flex-1 bg-slate-950/60 border border-slate-800/80 rounded-md p-2 overflow-y-auto min-h-[120px] flex flex-col items-center justify-center text-center">
+<i class="fa-solid fa-box-open text-slate-600 text-2xl mb-2"></i>
+<span class="text-xs text-slate-500">尚未选择输入</span>
+</div>
+</div>
+<!-- Display Layers Section -->
+<div class="p-3 h-1/2 flex flex-col bg-slate-900/40">
+<div class="text-xs font-medium text-slate-400 mb-2">显示图层</div>
+<div class="flex-1 bg-slate-950/60 border border-slate-800/80 rounded-md mb-3 p-2 overflow-y-auto">
+<!-- Empty layer state -->
+<div class="text-center py-6 text-slate-600 text-xs">暂无活动图层</div>
+</div>
+<button class="w-full bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 py-1.5 px-3 rounded-md text-xs font-medium transition flex items-center justify-center space-x-2">
+<i class="fa-solid fa-sliders text-slate-400"></i>
+<span>图层样式...</span>
+</button>
+</div>
+</aside>
+<!-- END: LeftSidebar -->
+<!-- BEGIN: CentralViewport -->
+<section class="flex-1 bg-slate-950 relative flex flex-col overflow-hidden" data-purpose="3d-viewport">
+<!-- Viewport overlay toolbar info -->
+<div class="absolute top-3 left-4 z-10 flex items-center space-x-3 pointer-events-none">
+<div class="bg-slate-900/80 backdrop-blur border border-slate-800/80 px-3 py-1.5 rounded-lg shadow-lg flex items-center space-x-2">
+<span class="text-xs font-semibold text-cyan-400">点云视图</span>
+<span class="text-slate-600">|</span>
+<span class="text-[11px] text-slate-400">拖动旋转 · 滚轮缩放</span>
+</div>
+</div>
+<!-- Center Empty State / Canvas Simulation -->
+<div class="flex-1 flex flex-col items-center justify-center p-6 text-center relative">
+<!-- Grid Background Pattern Simulated via CSS -->
+<div class="absolute inset-0 bg-[linear-gradient(to_right,#1e293b15_1px,transparent_1px),linear-gradient(to_bottom,#1e293b15_1px,transparent_1px)] bg-[size:32px_32px]"></div>
+<div class="relative z-10 max-w-md p-8 bg-slate-900/40 backdrop-blur-md border border-slate-800/60 rounded-2xl shadow-2xl flex flex-col items-center">
+<div class="w-16 h-16 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400 mb-4 shadow-inner">
+<i class="fa-solid fa-cloud-arrow-up text-2xl"></i>
+</div>
+<h2 class="text-base font-semibold text-slate-200 mb-1">从一份点云开始</h2>
+<p class="text-xs text-slate-400 mb-6 leading-relaxed">
+            导入 PCD、PLY 或 TXT 文件，选择算法并调整参数。<br/>处理结果将在这里与原始点云叠加显示。
+          </p>
+<button class="flex items-center space-x-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white px-5 py-2.5 rounded-xl text-xs font-semibold shadow-lg shadow-cyan-950/50 transition border border-cyan-400/30">
+<i class="fa-solid fa-folder-open"></i>
+<span>导入点云</span>
+</button>
+</div>
+</div>
+<!-- Floating Viewport Controls (Bottom-Left) -->
+<div class="absolute bottom-4 left-4 z-10 flex items-center space-x-1 bg-slate-900/80 backdrop-blur border border-slate-800/80 p-1 rounded-lg shadow-lg text-slate-400 text-xs">
+<button class="p-1.5 hover:bg-slate-800 hover:text-slate-200 rounded transition" title="正视图"><i class="fa-solid fa-cube"></i></button>
+<button class="p-1.5 hover:bg-slate-800 hover:text-slate-200 rounded transition" title="顶视图"><i class="fa-solid fa-square"></i></button>
+<button class="p-1.5 hover:bg-slate-800 hover:text-slate-200 rounded transition" title="侧视图"><i class="fa-solid fa-right-left"></i></button>
+<div class="h-3 w-[1px] bg-slate-800 mx-1"></div>
+<button class="p-1.5 hover:bg-slate-800 hover:text-slate-200 rounded transition" title="重置相机"><i class="fa-solid fa-rotate"></i></button>
+</div>
+</section>
+<!-- END: CentralViewport -->
+<!-- BEGIN: RightInspectorPanel -->
+<aside class="w-80 bg-slate-900/90 border-l border-slate-800 flex flex-col z-10" data-purpose="inspector-panel">
+<!-- Header -->
+<div class="p-3 border-b border-slate-800/80 flex items-center justify-between text-xs font-semibold text-slate-300">
+<span class="flex items-center space-x-2">
+<i class="fa-solid fa-gears text-cyan-400"></i>
+<span>算法与参数</span>
+</span>
+<div class="space-x-1 text-slate-500">
+<i class="fa-solid fa-minus hover:text-slate-300 cursor-pointer"></i>
+<i class="fa-solid fa-xmark hover:text-slate-300 cursor-pointer"></i>
+</div>
+</div>
+<!-- Scrollable Inspector Form Body -->
+<div class="flex-1 p-4 overflow-y-auto space-y-5 text-xs">
+<!-- Processing Algorithm Selector -->
+<div class="space-y-2">
+<label class="block font-medium text-slate-300">处理算法</label>
+<div class="relative">
+<select class="w-full bg-slate-950 border border-slate-700/80 rounded-md px-3 py-2 text-slate-200 focus:outline-none focus:border-cyan-500 appearance-none pr-8">
+<option>示例：降采样 → 离群过滤 → 平面提取</option>
+<option>体素网格降采样 (Voxel Grid)</option>
+<option>统计离群点去除 (SOR)</option>
+<option>RANSAC 平面拟合</option>
+</select>
+<div class="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none text-slate-400">
+<i class="fa-solid fa-chevron-down text-[10px]"></i>
+</div>
+</div>
+</div>
+<!-- Parameters Config Header & Presets -->
+<div class="flex items-center justify-between pt-1 border-t border-slate-800/60">
+<span class="font-medium text-slate-400">参数配置</span>
+<button class="bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 px-2.5 py-1 rounded text-[11px] font-medium transition flex items-center space-x-1.5">
+<span>参数预设</span>
+<i class="fa-solid fa-caret-down text-[9px]"></i>
+</button>
+</div>
+<!-- Parameter Group: Input & Downsampling -->
+<div class="bg-slate-950/40 border border-slate-800/60 rounded-lg p-3 space-y-3">
+<div class="font-medium text-cyan-400/90 text-[11px] uppercase tracking-wider pb-1 border-b border-slate-800/60">
+            输入与降采样
+          </div>
+<!-- Result Name -->
+<div class="space-y-1">
+<label class="text-slate-400 block">结果名称</label>
+<input class="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-cyan-500" type="text" value="提取平面"/>
+</div>
+<!-- Crop Direction -->
+<div class="space-y-1">
+<label class="text-slate-400 block">裁剪方向</label>
+<div class="relative">
+<select class="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1.5 text-slate-200 focus:outline-none focus:border-cyan-500 appearance-none pr-8">
+<option>Z 轴</option>
+<option>X 轴</option>
+<option>Y 轴</option>
+<option>自定义方向向量</option>
+</select>
+<div class="absolute inset-y-0 right-0 flex items-center px-2 pointer-events-none text-slate-400">
+<i class="fa-solid fa-chevron-down text-[10px]"></i>
+</div>
+</div>
+</div>
+<!-- Keep Range (Coordinate Unit) -->
+<div class="space-y-1">
+<label class="text-slate-400 block">保留范围 (坐标单位)</label>
+<div class="grid grid-cols-2 gap-2">
+<div class="flex items-center bg-slate-900 border border-slate-700 rounded px-2 py-1">
+<span class="text-slate-500 mr-2 text-[10px]">下限</span>
+<input class="w-full bg-transparent border-none p-0 text-slate-200 focus:ring-0 text-right" type="number" value="-100"/>
+</div>
+<div class="flex items-center bg-slate-900 border border-slate-700 rounded px-2 py-1">
+<span class="text-slate-500 mr-2 text-[10px]">上限</span>
+<input class="w-full bg-transparent border-none p-0 text-slate-200 focus:ring-0 text-right" type="number" value="100"/>
+</div>
+</div>
+</div>
+<!-- Enable Downsampling Checkbox -->
+<div class="pt-1">
+<label class="flex items-center space-x-2 cursor-pointer">
+<input checked="" class="rounded bg-slate-900 border-slate-700 text-cyan-500 focus:ring-0 focus:ring-offset-0 w-3.5 h-3.5" type="checkbox"/>
+<span class="text-slate-300 font-medium">启用降采样</span>
+</label>
+</div>
+</div>
+</div>
+<!-- Inspector Footer Action Buttons -->
+<div class="p-3 border-t border-slate-800/80 bg-slate-900/90 flex items-center space-x-2">
+<button class="flex-1 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white py-2 px-3 rounded-md text-xs font-semibold shadow-md shadow-cyan-950/50 transition flex items-center justify-center space-x-2 border border-cyan-400/30">
+<i class="fa-solid fa-play text-[10px]"></i>
+<span>运行算法</span>
+</button>
+<button class="bg-slate-800 hover:bg-red-950/40 hover:border-red-900/50 hover:text-red-400 text-slate-300 border border-slate-700 py-2 px-3 rounded-md text-xs font-medium transition flex items-center space-x-1.5">
+<i class="fa-solid fa-stop text-[10px]"></i>
+<span>停止</span>
+</button>
+</div>
+</aside>
+<!-- END: RightInspectorPanel -->
+</main>
+<!-- END: MainWorkspace -->
+<!-- BEGIN: BottomStatusBar -->
+<footer class="bg-slate-900 border-t border-slate-800 px-4 py-1 text-[11px] text-slate-400 flex items-center justify-between z-20" data-purpose="status-bar">
+<div class="flex items-center space-x-2">
+<span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+<span class="text-slate-300">就绪</span>
+</div>
+<div class="flex items-center space-x-4">
+<div class="flex items-center space-x-2">
+<span class="text-slate-500">内存占用:</span>
+<div class="w-20 bg-slate-800 h-1.5 rounded-full overflow-hidden">
+<div class="bg-cyan-500 h-full w-[24%]"></div>
+</div>
+<span class="text-slate-300">24%</span>
+</div>
+</div>
+</footer>
+<!-- END: BottomStatusBar -->
+</body></html>

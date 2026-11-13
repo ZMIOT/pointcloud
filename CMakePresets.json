@@ -1,0 +1,6 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {"name":"windows-base","hidden":true,"generator":"Visual Studio 17 2022","architecture":"x64","toolset":"v142","cacheVariables":{"CMAKE_INSTALL_PREFIX":"${sourceDir}/install","BUILD_TESTING":"ON"}}
+  ]
+}

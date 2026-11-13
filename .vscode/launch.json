@@ -1,0 +1,43 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "工作台: 运行 Release",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/bin/Release/Launcher.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/build/bin/Release",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "preLaunchTask": "工作台: 编译并部署运行库"
+    },
+    {
+      "name": "carExtractFeature: 运行工作台",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\install\\bin\\Launcher.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}\\install\\bin",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "preLaunchTask": "carExtractFeature: CMake 编译并部署",
+      "symbolSearchPath": "${workspaceFolder}\\algorithms\\carExtractFeature\\build\\bin\\Release\\plugins\\algorithm"
+    },
+    {
+      "name": "carExtractFeature: 检查 3.pcd",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}\\algorithms\\carExtractFeature\\build\\bin\\Release\\CarLapEdgeInspect.exe",
+      "args": [
+        "${workspaceFolder}\\examples\\carExtractFeature\\3.pcd",
+        "${workspaceFolder}\\algorithms\\carExtractFeature\\build\\vscode-inspect"
+      ],
+      "cwd": "${workspaceFolder}\\install\\bin",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "preLaunchTask": "carExtractFeature: CMake 编译",
+      "symbolSearchPath": "${workspaceFolder}\\algorithms\\carExtractFeature\\build\\bin\\Release"
+    }
+  ]
+}

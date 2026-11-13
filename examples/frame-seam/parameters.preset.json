@@ -1,0 +1,22 @@
+{
+    "algorithmId": "weld.frame_seam",
+    "parameterVersion": 1,
+    "values": {
+        "debug_detail": "stages",
+        "frameBinSize": 0.25,
+        "frameCornerWindow": 2.5,
+        "frameMaxCorrection": 1.2,
+        "frameMaxMissing": 3,
+        "frameMaxPointDistance": 0.8,
+        "frameMaxProfileGap": 1.5,
+        "frameMaxTrackJump": 3,
+        "frameMinDepth": 3,
+        "frameMinTurnDegrees": 25,
+        "frameSurfaceMaxRms": 0.6,
+        "frameSurfaceNeighbors": 3,
+        "frameSurfaceRadius": 4,
+        "manifest": "E:/CODE/extractFeature/frame_data/20260907_001/manifest.json",
+        "minSeamSeparation": 16,
+        "name": "焊缝"
+    }
+}

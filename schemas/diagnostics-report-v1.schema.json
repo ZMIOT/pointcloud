@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pointcloud-workbench.local/schemas/diagnostics-report-v1.schema.json",
+  "title": "PointCloud Workbench diagnostic report v1",
+  "type": "object",
+  "required": ["protocolVersion", "algorithmId", "algorithmVersion", "input", "parameters", "outputs", "issues"],
+  "properties": {
+    "protocolVersion": {"const": 1}, "algorithmId": {"$ref": "#/$defs/token"}, "algorithmVersion": {"$ref": "#/$defs/token"},
+    "input": {"type": "object", "required": ["cloudId", "pointCount", "coordinateFrame", "unit"], "properties": {"cloudId": {"type": "string"}, "pointCount": {"type": "integer", "minimum": 0}, "coordinateFrame": {"type": "string"}, "unit": {"type": "string"}}},
+    "parameters": {"type": "object"},
+    "outputs": {"type": "array", "items": {"type": "object", "required": ["id", "cloudIndex"], "properties": {"id": {"$ref": "#/$defs/token"}, "cloudIndex": {"type": "integer", "minimum": 0}, "statistics": {"type": "object", "properties": {"sampleCount": {"type": "integer", "minimum": 0}, "segmentCount": {"type": "integer", "minimum": 0}, "interpolatedCount": {"type": "integer", "minimum": 0}}}}}},
+    "issues": {"type": "array", "maxItems": 128, "items": {"type": "object", "required": ["code", "stage", "severity", "region", "visibility", "origin", "scope", "summary", "evidence"], "properties": {
+      "code": {"$ref": "#/$defs/token"}, "stage": {"$ref": "#/$defs/token"}, "severity": {"enum": ["info", "warning", "critical"]}, "visibility": {"enum": ["observable", "missing_input", "not_applicable", "unknown"]}, "origin": {"enum": ["undetermined", "input_missing", "acquisition_noise_suspected", "physical_defect_suspected", "physical_defect_confirmed", "algorithm_error_confirmed"]}, "summary": {"$ref": "#/$defs/token"},
+      "scope": {"type": "object", "required": ["targetId", "outputRole"], "properties": {"targetId": {"$ref": "#/$defs/token"}, "outputRole": {"$ref": "#/$defs/token"}}},
+      "region": {"oneOf": [
+        {"type": "object", "required": ["kind"], "properties": {"kind": {"const": "whole"}}},
+        {"type": "object", "required": ["kind", "index"], "properties": {"kind": {"const": "point_index"}, "index": {"type": "integer", "minimum": 0}}},
+        {"type": "object", "required": ["kind", "first", "last", "representative"], "properties": {"kind": {"const": "section_range"}, "first": {"type": "integer", "minimum": 0}, "last": {"type": "integer", "minimum": 0}, "representative": {"$ref": "#/$defs/xyz"}}},
+        {"type": "object", "required": ["kind", "min", "max"], "properties": {"kind": {"const": "bbox"}, "min": {"$ref": "#/$defs/xyz"}, "max": {"$ref": "#/$defs/xyz"}}}
+      ]},
+      "evidence": {"type": "object", "required": ["support", "supportUnit", "basis"], "properties": {"support": {"type": "integer", "minimum": 0}, "supportUnit": {"$ref": "#/$defs/token"}, "basis": {"$ref": "#/$defs/token"}, "observed": {"type": "number"}, "limit": {"type": "number"}, "unit": {"type": "string"}}}
+    }}}
+  },
+  "$defs": {"token": {"type": "string", "minLength": 1, "maxLength": 128}, "xyz": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}], "minItems": 3, "maxItems": 3}},
+  "additionalProperties": true
+}

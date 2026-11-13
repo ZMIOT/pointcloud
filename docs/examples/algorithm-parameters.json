@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "algorithmId": "custom.identity",
+  "parameterVersion": 1,
+  "title": "算法参数接入示例",
+  "groups": [
+    {
+      "id": "basic",
+      "title": "基本参数",
+      "parameters": [
+        { "id": "name", "type": "string", "label": "结果名称", "default": "处理结果", "required": true, "maxLength": 64 },
+        { "id": "enable_downsample", "type": "bool", "label": "启用降采样", "default": true },
+        { "id": "leaf_size", "type": "double", "label": "体素尺寸", "default": 0.02, "min": 0.001, "max": 10000, "step": 0.001, "decimals": 3, "unit": "坐标单位", "description": "算法需要 float 时，读取后显式转换。", "enabledWhen": { "parameter": "enable_downsample", "operator": "eq", "value": true } },
+        { "id": "distance", "type": "double", "label": "距离阈值", "default": 0.01, "min": 0.000001, "max": 10000, "step": 0.001, "decimals": 6, "unit": "坐标单位" },
+        { "id": "iterations", "type": "int", "label": "迭代次数", "default": 200, "min": 1, "max": 10000, "step": 10 },
+        { "id": "limits", "type": "range", "valueType": "double", "label": "保留范围", "default": { "lower": -1.0, "upper": 1.0 }, "min": -1000, "max": 1000, "step": 0.01, "decimals": 3, "unit": "坐标单位" },
+        { "id": "axis", "type": "enum", "label": "过滤方向", "default": "z", "options": [ { "value": "x", "label": "X 轴" }, { "value": "y", "label": "Y 轴" }, { "value": "z", "label": "Z 轴" } ] }
+      ]
+    },
+    {
+      "id": "extra",
+      "title": "其他类型示例",
+      "advanced": true,
+      "parameters": [
+        { "id": "index_limits", "type": "range", "valueType": "int", "label": "索引范围", "default": { "lower": 0, "upper": 100 }, "min": 0, "max": 100000, "step": 1 },
+        { "id": "notes", "type": "string", "label": "备注", "default": "", "multiline": true, "maxLength": 500 },
+        { "id": "reference_file", "type": "file", "label": "参考点云", "default": "", "required": false, "mustExist": true, "filter": "Point cloud (*.pcd *.ply)" },
+        { "id": "output_directory", "type": "directory", "label": "输出目录", "default": "", "required": false, "mustExist": true },
+        { "id": "offset", "type": "vector3", "label": "平移向量", "default": [0.0, 0.0, 0.0], "min": -1000, "max": 1000, "step": 0.01, "decimals": 3, "unit": "坐标单位" },
+        { "id": "result_color", "type": "color", "label": "结果颜色", "default": [70, 245, 140, 255] }
+      ]
+    }
+  ]
+}

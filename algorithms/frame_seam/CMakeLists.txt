@@ -1,0 +1,52 @@
+cmake_minimum_required(VERSION 3.20)
+project(FrameSeamPlugin VERSION 1.0.0 LANGUAGES C CXX)
+find_package(FrameworkSDK 1 CONFIG REQUIRED)
+find_package(PCL 1.11 REQUIRED COMPONENTS common io)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+set(CMAKE_AUTOMOC ON)
+if(MSVC)
+  add_compile_options(/utf-8 /bigobj)
+  add_compile_definitions(NOMINMAX _USE_MATH_DEFINES)
+endif()
+
+# Optional integration harness. It loads existing host DLLs without rebuilding them.
+option(FRAME_SEAM_GUI_SMOKE "Build the host integration smoke tool" OFF)
+if(FRAME_SEAM_GUI_SMOKE)
+  find_package(Qt5 REQUIRED COMPONENTS Widgets OpenGL)
+  find_package(VTK REQUIRED)
+  if(VTK_VERSION VERSION_LESS 9)
+    include(${VTK_USE_FILE})
+    set(FRAME_VTK_QT vtkGUISupportQt)
+  else()
+    set(FRAME_VTK_QT VTK::GUISupportQt)
+  endif()
+  get_filename_component(FRAME_SDK_ROOT "${FrameworkSDK_DIR}/../../.." ABSOLUTE)
+  set(FRAME_SEAM_HOST_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../.." CACHE PATH "Host headers used only by the integration harness")
+  add_executable(FrameSeamUiSmoke tests/UiSmoke.cpp "${FRAME_SEAM_HOST_SOURCE}/ui/icons.qrc")
+  set_target_properties(FrameSeamUiSmoke PROPERTIES AUTORCC ON)
+  target_include_directories(FrameSeamUiSmoke PRIVATE "${FRAME_SEAM_HOST_SOURCE}/core" "${FRAME_SEAM_HOST_SOURCE}/ui")
+  target_link_libraries(FrameSeamUiSmoke PRIVATE FrameSeamCore Framework::SDK Qt5::Widgets Qt5::OpenGL "${FRAME_SDK_ROOT}/lib/FrameworkCore.lib" ${FRAME_VTK_QT} ${VTK_LIBRARIES})
+endif()
+
+add_library(FrameSeamCore STATIC
+  core/AlgorithmPipeline.cpp core/FrameSeamAlgorithm.cpp
+  core/PointCloudIO.cpp core/FrameManifestIO.cpp)
+target_include_directories(FrameSeamCore PUBLIC core ${PCL_INCLUDE_DIRS})
+target_link_libraries(FrameSeamCore PUBLIC Qt5::Core pcl_common pcl_io)
+
+framework_add_plugin(FrameSeamAlgorithm TYPE algorithm
+  ID weld.frame_seam ALGORITHM_ID weld.frame_seam
+  VERSION 1.0.0 PARAMETER_VERSION 1 SOURCES Plugin.cpp parameters.qrc)
+target_link_libraries(FrameSeamAlgorithm PRIVATE FrameSeamCore)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(OriginalFrameTests tests/OriginalFrameTests.cpp)
+  target_link_libraries(OriginalFrameTests PRIVATE FrameSeamCore)
+  add_test(NAME original_frame_algorithm COMMAND OriginalFrameTests)
+  add_executable(FrameSeamPluginTests tests/PluginTests.cpp)
+  target_link_libraries(FrameSeamPluginTests PRIVATE FrameSeamCore Framework::SDK)
+  target_compile_definitions(FrameSeamPluginTests PRIVATE PLUGIN_PATH="$<TARGET_FILE:FrameSeamAlgorithm>")
+  add_dependencies(FrameSeamPluginTests FrameSeamAlgorithm)
+  add_test(NAME plugin_frame_integration COMMAND FrameSeamPluginTests)
+endif()

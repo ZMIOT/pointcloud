@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1, "parameterVersion": 1,
+  "algorithmId": "custom.carExtractFeature", "title": "上层搭接边缘提取",
+  "groups": [
+    {"id":"basic", "title":"边缘与轨迹", "parameters":[
+      {"id":"up_axis","type":"enum","label":"上方方向","default":"+z","options":[{"value":"+x","label":"+X"},{"value":"-x","label":"−X"},{"value":"+y","label":"+Y"},{"value":"-y","label":"−Y"},{"value":"+z","label":"+Z"},{"value":"-z","label":"−Z"}]},
+      {"id":"neighborhood_scale","type":"double","label":"邻域尺度倍率","default":1.0,"min":0.5,"max":3.0,"step":0.1,"decimals":2,"description":"局部点距与截面间距自动估计；此倍率调整邻截面验证范围。"},
+      {"id":"smoothing","type":"double","label":"平滑强度","default":1.0,"min":0.0,"max":4.0,"step":0.2,"decimals":2,"description":"0 为关闭，1 为中等。实测边界点始终保持原始坐标。"},
+      {"id":"max_missing","type":"int","label":"最大补点截面数","default":3,"min":0,"max":3,"description":"仅补两端证据可靠且通过曲面验证的内部短缺口；0 表示不补点。"}
+    ]},
+    {"id":"advanced","title":"高级：扫描平面","advanced":true,"parameters":[
+      {"id":"manual_scan_normal","type":"bool","label":"手动指定扫描平面法向","default":false},
+      {"id":"scan_nx","type":"double","label":"法向 X","default":0.0,"min":-1.0,"max":1.0,"decimals":6,"enabledWhen":{"parameter":"manual_scan_normal","operator":"eq","value":true}},
+      {"id":"scan_ny","type":"double","label":"法向 Y","default":1.0,"min":-1.0,"max":1.0,"decimals":6,"enabledWhen":{"parameter":"manual_scan_normal","operator":"eq","value":true}},
+      {"id":"scan_nz","type":"double","label":"法向 Z","default":0.0,"min":-1.0,"max":1.0,"decimals":6,"enabledWhen":{"parameter":"manual_scan_normal","operator":"eq","value":true}}
+    ]}
+  ]
+}

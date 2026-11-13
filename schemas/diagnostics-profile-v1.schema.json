@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pointcloud-workbench.local/schemas/diagnostics-profile-v1.schema.json",
+  "title": "PointCloud Workbench diagnostic profile v1",
+  "type": "object",
+  "required": ["protocolVersion", "algorithmId", "algorithmVersion", "orderedInput", "stages", "outputs", "codes", "trialParameters"],
+  "properties": {
+    "protocolVersion": {"const": 1},
+    "algorithmId": {"$ref": "#/$defs/token"},
+    "algorithmVersion": {"$ref": "#/$defs/token"},
+    "orderedInput": {"type": "boolean"},
+    "stages": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["id", "label"], "properties": {"id": {"$ref": "#/$defs/token"}, "label": {"$ref": "#/$defs/token"}}}},
+    "outputs": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["id", "targetId", "role", "geometry"], "properties": {"id": {"$ref": "#/$defs/token"}, "targetId": {"$ref": "#/$defs/token"}, "targetLabel": {"$ref": "#/$defs/token"}, "role": {"enum": ["measured", "fitted", "segmented", "measurement", "auxiliary"]}, "geometry": {"enum": ["points", "polyline", "surface", "region", "measurement"]}}}},
+    "codes": {"type": "array", "items": {"type": "object", "required": ["id", "stage", "defaultSeverity", "label"], "properties": {"id": {"$ref": "#/$defs/token"}, "stage": {"$ref": "#/$defs/token"}, "defaultSeverity": {"enum": ["info", "warning", "critical"]}, "label": {"$ref": "#/$defs/token"}}}},
+    "trialParameters": {"type": "array", "items": {"type": "object", "required": ["id", "stages", "step", "maySuppressPhysicalDefect", "expectedChange", "risk", "cannotFix"], "properties": {"id": {"$ref": "#/$defs/token"}, "stages": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/token"}}, "step": {"type": "number", "exclusiveMinimum": 0}, "maySuppressPhysicalDefect": {"type": "boolean"}, "expectedChange": {"$ref": "#/$defs/token"}, "risk": {"$ref": "#/$defs/token"}, "cannotFix": {"$ref": "#/$defs/token"}}}}
+  },
+  "$defs": {"token": {"type": "string", "minLength": 1, "maxLength": 128}},
+  "additionalProperties": true
+}

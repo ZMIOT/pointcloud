@@ -1,0 +1,87 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "工作台: CMake 配置并生成",
+      "type": "process",
+      "command": "${config:cmake.cmakePath}",
+      "args": ["--preset", "local"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "工作台: Release 编译",
+      "type": "process",
+      "command": "${config:cmake.cmakePath}",
+      "args": ["--build", "--preset", "local-release", "--parallel", "4"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "工作台: CMake 配置并生成",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "工作台: 编译并部署运行库",
+      "type": "process",
+      "command": "${config:cmake.cmakePath}",
+      "args": ["--build", "--preset", "local-release", "--target", "deploy", "--parallel", "4"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "工作台: Release 编译",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "工作台: CTest 测试",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/scripts/Invoke-Local.ps1", "Test"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "工作台: 编译并部署运行库",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "工作台: 安装 SDK 和运行库",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/scripts/Invoke-Local.ps1", "Install"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": "工作台: Release 编译",
+      "problemMatcher": []
+    },
+    {
+      "label": "carExtractFeature: CMake 配置",
+      "type": "process",
+      "command": "${config:cmake.cmakePath}",
+      "args": ["--preset", "local"],
+      "options": { "cwd": "${workspaceFolder}\\algorithms\\carExtractFeature" },
+      "problemMatcher": []
+    },
+    {
+      "label": "carExtractFeature: CMake 编译",
+      "type": "process",
+      "command": "${config:cmake.cmakePath}",
+      "args": ["--build", "--preset", "local-release", "--parallel", "4"],
+      "options": { "cwd": "${workspaceFolder}\\algorithms\\carExtractFeature" },
+      "dependsOn": "carExtractFeature: CMake 配置",
+      "group": "build",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "carExtractFeature: CTest 测试",
+      "type": "process",
+      "command": "E:/environments/vs2022_buildtools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/ctest.exe",
+      "args": ["--preset", "local-release"],
+      "options": { "cwd": "${workspaceFolder}\\algorithms\\carExtractFeature" },
+      "dependsOn": "carExtractFeature: CMake 编译",
+      "problemMatcher": []
+    },
+    {
+      "label": "carExtractFeature: CMake 编译并部署",
+      "type": "process",
+      "command": "${config:cmake.cmakePath}",
+      "args": ["--build", "--preset", "local-release", "--target", "CarExtractFeatureDeploy", "--parallel", "4"],
+      "options": { "cwd": "${workspaceFolder}\\algorithms\\carExtractFeature" },
+      "dependsOn": "carExtractFeature: CMake 配置",
+      "problemMatcher": "$msCompile"
+    }
+  ]
+}

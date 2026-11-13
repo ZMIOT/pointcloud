@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "windows-release",
+      "displayName": "Car extract feature (Windows Release x64)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "toolset": "v142",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "FrameworkSDK_DIR": "${sourceDir}/../../install/lib/cmake/FrameworkSDK"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-release", "configurePreset": "windows-release", "configuration": "Release" }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "configuration": "Release",
+      "environment": {
+        "PATH": "${sourceDir}/../../install/bin;$penv{PATH}"
+      },
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

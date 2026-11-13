@@ -1,0 +1,717 @@
+{
+  "schemaVersion": 1,
+  "algorithmId": "weld.extract_feature2",
+  "parameterVersion": 8,
+  "title": "ExtractFeature2 主体保留与焊缝提取",
+  "diagnostics": {
+    "protocolVersion": 1,
+    "algorithmId": "weld.extract_feature2",
+    "algorithmVersion": "1.9.0",
+    "orderedInput": false,
+    "stages": [
+      {"id": "hull_surfaces", "label": "面连续性分块与最大主体保留"},
+      {"id": "hull_crop", "label": "整船外壁包络裁剪"},
+      {"id": "candidate", "label": "截面结构候选"},
+      {"id": "selection", "label": "左右成对路径"},
+      {"id": "geometry", "label": "侧壁与底面修正"},
+      {"id": "smoothing", "label": "可选鲁棒 RTS"}
+    ],
+    "outputs": [
+      {"id": "hull_body", "targetId": "hull_main_body", "targetLabel": "最大连续主体", "role": "segmented", "geometry": "surface"},
+      {"id": "left_seam", "targetId": "left_weld_seam", "targetLabel": "左焊缝", "role": "fitted", "geometry": "polyline"},
+      {"id": "right_seam", "targetId": "right_weld_seam", "targetLabel": "右焊缝", "role": "fitted", "geometry": "polyline"}
+    ],
+    "codes": [
+      {"id": "hull_completeness_unverified", "stage": "hull_surfaces", "defaultSeverity": "info", "label": "三面完整性待复核"},
+      {"id": "hull_near_surface_rejected", "stage": "hull_surfaces", "defaultSeverity": "info", "label": "贴近曲面的剔除点待复核"},
+      {"id": "hull_uncertain_points_preserved", "stage": "hull_surfaces", "defaultSeverity": "info", "label": "交界保护带中的实测点待复核"},
+      {"id": "hull_envelope_unavailable", "stage": "hull_crop", "defaultSeverity": "warning", "label": "未形成可靠的整船外壁包络"},
+      {"id": "interior_orientation_ambiguous", "stage": "candidate", "defaultSeverity": "warning", "label": "船体内部方向证据接近"},
+      {"id": "limited_frame_coverage", "stage": "candidate", "defaultSeverity": "info", "label": "连续主体段帧覆盖不足"},
+      {"id": "trajectory_jump_observed", "stage": "selection", "defaultSeverity": "warning", "label": "相邻帧轨迹跳变"},
+      {"id": "geometry_evidence_weak", "stage": "geometry", "defaultSeverity": "info", "label": "局部几何约束未全部通过"},
+      {"id": "seam_position_unverified", "stage": "geometry", "defaultSeverity": "info", "label": "焊缝全长定位待真值复核"},
+      {"id": "rts_innovation_outlier", "stage": "smoothing", "defaultSeverity": "warning", "label": "轨迹创新异常"},
+      {"id": "rts_correction_limited", "stage": "smoothing", "defaultSeverity": "info", "label": "RTS 修正受到约束"}
+    ],
+    "trialParameters": [
+      {"id": "profileBinSize", "stages": ["candidate", "geometry"], "step": 0.1, "maySuppressPhysicalDefect": true, "expectedChange": "改变剖面采样分辨率；稳定网格模式下拟合和几何尺度保持独立", "risk": "过小会降低单箱支持，过大会合并真实折角", "cannotFix": "不能修复输入缺测、错误纵向轴或不可见焊缝"},
+      {"id": "rtsProcessNoise", "stages": ["smoothing"], "step": 0.01, "maySuppressPhysicalDefect": true, "expectedChange": "改变轨迹对局部曲率变化的跟随程度", "risk": "过小可能抹平真实转折，过大可能保留噪声", "cannotFix": "不能修复候选选错或输入缺测"},
+      {"id": "rtsMeasurementStddev", "stages": ["smoothing"], "step": 0.1, "maySuppressPhysicalDefect": true, "expectedChange": "改变对逐截面测量的信任程度", "risk": "过大可能偏离可靠测量", "cannotFix": "不能生成缺失的几何证据"},
+      {"id": "rtsMaxCorrection", "stages": ["smoothing"], "step": 0.2, "maySuppressPhysicalDefect": true, "expectedChange": "改变单点允许的最大平滑位移", "risk": "过大可能掩盖真实局部形变", "cannotFix": "不能证明平滑后位置是真实焊缝"}
+    ]
+  },
+  "groups": [
+    {
+      "id": "basic",
+      "title": "基本参数",
+      "parameters": [
+        {
+          "id": "name",
+          "type": "string",
+          "label": "结果名称",
+          "default": "ExtractFeature2 主体",
+          "required": true,
+          "maxLength": 64
+        },
+        {
+          "id": "longitudinalAxis",
+          "type": "enum",
+          "label": "纵向轴",
+          "default": "x",
+          "options": [
+            {
+              "value": "x",
+              "label": "X 轴"
+            },
+            {
+              "value": "y",
+              "label": "Y 轴"
+            },
+            {
+              "value": "z",
+              "label": "Z 轴"
+            }
+          ]
+        },
+        {
+          "id": "interiorOpeningDirection",
+          "type": "enum",
+          "label": "船体内部开口方向",
+          "default": "auto",
+          "options": [
+            {"value": "auto", "label": "自动（按连续结构判断）"},
+            {"value": "positive_v", "label": "剖面 V 正方向"},
+            {"value": "negative_v", "label": "剖面 V 负方向"}
+          ],
+          "description": "先排除凹向相反的外侧三面结构。纵向为 X 时剖面 V 是 Z；自动模式只依据跨截面覆盖率与几何代价，证据接近时需人工确认。"
+        },
+        {
+          "id": "useHullEnvelopeCrop",
+          "type": "bool",
+          "label": "先按整船外壁裁剪",
+          "default": true,
+          "description": "在纵向—竖向投影中寻找连续的上外壁和底部外壁，只保留闭合包络内的点。用于排除船体外部支架、飞点和扫描拖影。"
+        },
+        {
+          "id": "floorPatchSize",
+          "type": "double",
+          "label": "局部底面取样尺寸",
+          "default": 6.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {
+            "parameter": "useLocalFloorConstraint",
+            "operator": "eq",
+            "value": true
+          }
+        },
+        {
+          "id": "useLocalFloorConstraint",
+          "type": "bool",
+          "label": "启用局部底面约束",
+          "default": true
+        },
+        {
+          "id": "voxelSize",
+          "type": "double",
+          "label": "体素尺寸（0 关闭）",
+          "default": 0.8,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "outlierMeanK",
+          "type": "int",
+          "label": "离群滤波近邻数量",
+          "default": 12,
+          "min": 1,
+          "max": 10000,
+          "step": 1
+        },
+        {
+          "id": "outlierStddev",
+          "type": "double",
+          "label": "离群滤波标准差倍数",
+          "default": 2.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "sliceStep",
+          "type": "double",
+          "label": "截面步长",
+          "default": 2.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "description": "普通点云使用此值；带 frame_index 的原始帧点云忽略此值。"
+        },
+        {
+          "id": "sliceThickness",
+          "type": "double",
+          "label": "截面厚度",
+          "default": 3.5,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "description": "普通点云使用此值；带 frame_index 的原始帧点云忽略此值。"
+        },
+        {
+          "id": "profileBinSize",
+          "type": "double",
+          "label": "剖面分箱尺寸",
+          "default": 1.2,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "minSeamSeparation",
+          "type": "double",
+          "label": "左右焊缝最小间距",
+          "default": 16.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "description": "控制剖面采样分辨率。稳定网格模式下不会再同步放大或缩小后续几何尺度。"
+        },
+        {
+          "id": "profileSamplingMode",
+          "type": "enum",
+          "label": "剖面分箱模式",
+          "default": "legacy_rolling",
+          "options": [
+            {"value": "legacy_rolling", "label": "原始滚动分箱（兼容）"},
+            {"value": "stable_grid", "label": "固定网格与物理尺度（推荐试用）"}
+          ],
+          "description": "原始模式完整保留旧行为；稳定模式让整云共用分箱原点，并将拟合窗口和几何阈值与分箱宽度解耦。"
+        },
+        {
+          "id": "profileReferenceScale",
+          "type": "double",
+          "label": "剖面几何参考尺度",
+          "default": 1.2,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {
+            "parameter": "profileSamplingMode",
+            "operator": "eq",
+            "value": "stable_grid"
+          },
+          "description": "稳定模式的固定物理尺度。通常保持 1.2，只调整剖面分箱尺寸。"
+        },
+        {
+          "id": "postprocessMode",
+          "type": "enum",
+          "label": "最终轨迹后处理",
+          "default": "legacy",
+          "options": [
+            {"value": "legacy", "label": "原始算法（稳定）"},
+            {"value": "robust_rts", "label": "鲁棒 RTS（实验）"}
+          ],
+          "description": "默认保留原始结果；鲁棒 RTS 仅在显式选择后启用，可随时回退。"
+        },
+        {
+          "id": "debug_detail",
+          "type": "enum",
+          "label": "调试步骤",
+          "default": "stages",
+          "options": [
+            {
+              "value": "stages",
+              "label": "主要阶段"
+            },
+            {
+              "value": "all",
+              "label": "全部步骤"
+            }
+          ],
+          "description": "主要阶段显示每类步骤首次出现；全部步骤包含每个截面和局部拟合。"
+        }
+      ]
+    },
+    {
+      "id": "advanced",
+      "title": "高级参数",
+      "advanced": true,
+      "parameters": [
+        {
+          "id": "processingMode", "type": "enum", "label": "处理范围", "default": "protected_seams",
+          "options": [{"value": "protected_seams", "label": "完整流程：主体保护＋两条焊缝"}, {"value": "surfaces_only", "label": "第一步：主体与底面保护"}, {"value": "legacy_seams", "label": "旧流程：焊缝提取"}],
+          "description": "完整流程先保护底面与交界，再逐截面求两侧交线，保留各有效段而非仅最长段；长缺口不跨接。完整流程不再执行离群滤波、体素降采样或旧外壁包络裁剪，相关参数仅用于旧流程。输出含两条焊缝及未经二次滤波的主体原始点。"
+        },
+        {
+          "id": "protectedProfileBinSize", "type": "double", "label": "完整流程：剖面采样间距", "default": 0.6, "min": 0.1, "max": 10, "step": 0.1,
+          "description": "仅用于主体保护后的焊缝识别；控制剖面采样及局部拟合尺度。过大会漏掉收窄底面的交界，过小可能放大噪声。"
+        },
+        {
+          "id": "protectedMinSeamSeparation", "type": "double", "label": "完整流程：两缝最小间距", "default": 6.0, "min": 0.1, "max": 1000, "step": 0.5,
+          "description": "仅用于完整流程，单位同输入；保留船型两端收窄的底面交线，但仍须通过两侧面与底面的几何检验。"
+        },
+        {
+          "id": "hullSurfaceVoxelSize", "type": "double", "label": "三面分析网格", "default": 1.0, "min": 0.1, "max": 20, "step": 0.1,
+          "description": "单位同输入；面识别降采样及邻域尺度。局部曲面搜索半径为网格的 18 倍，但保留范围受实测支持边界限制；过大可能误连或跨越真实结构。输出仍是原始实测点。"
+        },
+        {
+          "id": "hullSurfaceCurvature", "type": "double", "label": "局部面散乱度上限", "default": 0.035, "min": 0.001, "max": 0.2, "step": 0.005, "decimals": 3,
+          "description": "局部协方差最小特征值占比；过大可能连入杂散点，过小可能割裂真实弯曲面。不要求侧壁与底面法向相同。"
+        },
+        {
+          "id": "hullSurfaceDistance", "type": "double", "label": "参考曲面拟合容差", "default": 0.6, "min": 0.01, "max": 10, "step": 0.1,
+          "description": "单位同输入；用于建立严格的参考曲面，不再单独决定清理时原始点的去留。焊缝局部面拟合仍使用各自的 RMS 条件。"
+        },
+        {
+          "id": "hullPreservationMargin", "type": "double", "label": "底面与交界原始点保护余量", "default": 3.0, "min": 0, "max": 20, "step": 0.1,
+          "description": "单位同输入；只在主体参考曲面的有界支持范围内保留附近原始点，不补点、不扩张主体。独立于拟合容差；过小可能切掉粗糙底面和焊趾，过大可能保留贴面干扰。0 恢复原先严格清理行为。保留点仍须经过后续独立的稳健面拟合。"
+        },
+        {
+          "id": "hullEnvelopeGridSize",
+          "type": "double",
+          "label": "外壁包络网格尺寸",
+          "default": 2.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {"parameter": "useHullEnvelopeCrop", "operator": "eq", "value": true},
+          "description": "纵向—竖向投影的统计网格尺寸，单位与输入点云一致。"
+        },
+        {
+          "id": "hullEnvelopeMinCellSupport",
+          "type": "int",
+          "label": "外壁网格最小点数",
+          "default": 8,
+          "min": 1,
+          "max": 1000000,
+          "step": 1,
+          "enabledWhen": {"parameter": "useHullEnvelopeCrop", "operator": "eq", "value": true},
+          "description": "低于该点数的投影网格不作为外壁证据，但仍可在最终包络内部被保留。"
+        },
+        {
+          "id": "hullEnvelopeMinThickness",
+          "type": "double",
+          "label": "船体投影最小厚度",
+          "default": 8.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {"parameter": "useHullEnvelopeCrop", "operator": "eq", "value": true},
+          "description": "连续纵向主体必须达到的最小竖向厚度，用于排除细长扫描拖影。"
+        },
+        {
+          "id": "hullEnvelopeMargin",
+          "type": "double",
+          "label": "外壁裁剪余量",
+          "default": 4.0,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {"parameter": "useHullEnvelopeCrop", "operator": "eq", "value": true},
+          "description": "在识别的上外壁和底部外壁之外保留的安全距离。"
+        },
+        {
+          "id": "hullEnvelopeSmoothingRadius",
+          "type": "int",
+          "label": "外壁包络平滑半径",
+          "default": 4,
+          "min": 0,
+          "max": 1000,
+          "step": 1,
+          "enabledWhen": {"parameter": "useHullEnvelopeCrop", "operator": "eq", "value": true},
+          "description": "以投影列为单位的中值平滑半径，用于抑制外部细线与船体交叉造成的包络尖刺。"
+        },
+        {
+          "id": "floorPatchGuard",
+          "type": "double",
+          "label": "底面取样安全距离",
+          "default": 0.6,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {
+            "parameter": "useLocalFloorConstraint",
+            "operator": "eq",
+            "value": true
+          }
+        },
+        {
+          "id": "floorPatchMaxRms",
+          "type": "double",
+          "label": "底面拟合最大 RMS",
+          "default": 0.4,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {
+            "parameter": "useLocalFloorConstraint",
+            "operator": "eq",
+            "value": true
+          }
+        },
+        {
+          "id": "floorPatchMaxCorrection",
+          "type": "double",
+          "label": "底面最大修正距离",
+          "default": 5.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {
+            "parameter": "useLocalFloorConstraint",
+            "operator": "eq",
+            "value": true
+          }
+        },
+        {
+          "id": "fitHalfWindow",
+          "type": "int",
+          "label": "拟合半窗口",
+          "default": 5,
+          "min": 1,
+          "max": 10000,
+          "step": 1
+        },
+        {
+          "id": "fitGuardPoints",
+          "type": "int",
+          "label": "交接区跳过点数",
+          "default": 1,
+          "min": 0,
+          "max": 10000,
+          "step": 1
+        },
+        {
+          "id": "maxBottomSlope",
+          "type": "double",
+          "label": "底面最大斜率",
+          "default": 0.9,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "minSurfaceAngleDegrees",
+          "type": "double",
+          "label": "侧壁与底面最小夹角",
+          "default": 20.0,
+          "min": 0.001,
+          "max": 180,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "minLocalSurfaceAngleDegrees",
+          "type": "double",
+          "label": "局部最小夹角",
+          "default": 8.0,
+          "min": 0.001,
+          "max": 180,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "localAngleWindow",
+          "type": "int",
+          "label": "局部角度窗口",
+          "default": 4,
+          "min": 1,
+          "max": 10000,
+          "step": 1
+        },
+        {
+          "id": "maxLocalFitNormalChangeDegrees",
+          "type": "double",
+          "label": "局部拟合法向最大变化角",
+          "default": 6.0,
+          "min": 0.001,
+          "max": 180,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "maxLocalBottomAngleDifferenceDegrees",
+          "type": "double",
+          "label": "左右底面最大夹角",
+          "default": 18.0,
+          "min": 0.001,
+          "max": 180,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "useRegionGrowingEdges",
+          "type": "bool",
+          "label": "启用区域生长边界",
+          "default": true
+        },
+        {
+          "id": "useContourRegionGrowing",
+          "type": "bool",
+          "label": "启用轮廓区域生长",
+          "default": true
+        },
+        {
+          "id": "minContourCornerAngleDegrees",
+          "type": "double",
+          "label": "轮廓折角最小夹角",
+          "default": 50.0,
+          "min": 0.001,
+          "max": 180,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "regionGrowingWindow",
+          "type": "int",
+          "label": "区域生长窗口",
+          "default": 4,
+          "min": 3,
+          "max": 10000,
+          "step": 1
+        },
+        {
+          "id": "regionGrowingSmoothnessDegrees",
+          "type": "double",
+          "label": "区域生长平滑角",
+          "default": 10.0,
+          "min": 0.001,
+          "max": 180,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "regionGrowingMaxNormalDriftDegrees",
+          "type": "double",
+          "label": "区域生长最大法向漂移",
+          "default": 35.0,
+          "min": 0.001,
+          "max": 180,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "regionGrowingDistance",
+          "type": "double",
+          "label": "区域生长距离",
+          "default": 2.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "regionGrowingMaxEdgeGap",
+          "type": "double",
+          "label": "区域边缘最大缺口",
+          "default": 8.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "surfaceIntersectionTolerance",
+          "type": "double",
+          "label": "面交点容差",
+          "default": 10.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "minSurfaceClearance",
+          "type": "double",
+          "label": "侧面最小分离距离",
+          "default": 2.0,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "surfaceRmsScale",
+          "type": "double",
+          "label": "表面 RMS 评分尺度",
+          "default": 2.5,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "maxCandidatesPerSlice",
+          "type": "int",
+          "label": "每截面最大候选数量",
+          "default": 7,
+          "min": 1,
+          "max": 10000,
+          "step": 1
+        },
+        {
+          "id": "minCandidateSpacing",
+          "type": "double",
+          "label": "候选最小间距",
+          "default": 4.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "maxBeadWidth",
+          "type": "double",
+          "label": "最大焊道宽度",
+          "default": 18.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "maxTransitionDistance",
+          "type": "double",
+          "label": "路径最大转移距离",
+          "default": 12.0,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "smoothnessWeight",
+          "type": "double",
+          "label": "路径平滑权重",
+          "default": 2.0,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "curvatureWeight",
+          "type": "double",
+          "label": "曲率权重",
+          "default": 4.0,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "featureWeight",
+          "type": "double",
+          "label": "特征权重",
+          "default": 4.0,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "longitudinalDetrendMinSpan",
+          "type": "double",
+          "label": "纵向去趋势最小跨度（0 关闭）",
+          "default": 0.0,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "maxInterpolatedGapStations",
+          "type": "int",
+          "label": "最大插补站位数",
+          "default": 3,
+          "min": 0,
+          "max": 10000,
+          "step": 1
+        },
+        {
+          "id": "curveRegularizationWeight",
+          "type": "double",
+          "label": "曲线正则权重",
+          "default": 12.0,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3
+        },
+        {
+          "id": "rtsProcessNoise",
+          "type": "double",
+          "label": "RTS 过程噪声",
+          "default": 0.04,
+          "min": 0.000001,
+          "max": 10000,
+          "step": 0.01,
+          "decimals": 6,
+          "enabledWhen": {"parameter": "postprocessMode", "operator": "eq", "value": "robust_rts"}
+        },
+        {
+          "id": "rtsMeasurementStddev",
+          "type": "double",
+          "label": "RTS 测量标准差",
+          "default": 0.6,
+          "min": 0.000001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 6,
+          "enabledWhen": {"parameter": "postprocessMode", "operator": "eq", "value": "robust_rts"}
+        },
+        {
+          "id": "rtsInnovationGate",
+          "type": "double",
+          "label": "RTS 创新门限（NIS）",
+          "default": 9.21,
+          "min": 0.001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {"parameter": "postprocessMode", "operator": "eq", "value": "robust_rts"}
+        },
+        {
+          "id": "rtsMaxCorrection",
+          "type": "double",
+          "label": "RTS 单点最大修正",
+          "default": 2.0,
+          "min": 0,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {"parameter": "postprocessMode", "operator": "eq", "value": "robust_rts"}
+        },
+        {
+          "id": "rtsGeometryTolerance",
+          "type": "double",
+          "label": "RTS 几何残差容差",
+          "default": 0.6,
+          "min": 0.000001,
+          "max": 10000,
+          "step": 0.1,
+          "decimals": 3,
+          "enabledWhen": {"parameter": "postprocessMode", "operator": "eq", "value": "robust_rts"}
+        }
+      ]
+    }
+  ]
+}
