@@ -1,4 +1,5 @@
 #include "CorrugatedPanel.h"
+#include "SurfaceIntersection.h"
 
 #include <Eigen/Eigenvalues>
 #include <algorithm>
@@ -279,26 +280,9 @@ double signedReferenceDistance(const ReferenceModel &model, const Vec3 &point) {
     return plane.normal.dot(point) + plane.d;
 }
 
-Vec3 projectToReference(const ReferenceModel &model, const Vec3 &point) {
-    const auto &plane = localPlane(model, point);
-    return point - (plane.normal.dot(point) + plane.d) * plane.normal;
-}
-
 Eigen::Vector2d flattenReference(const ReferenceModel &model, const Vec3 &point) {
     const Vec3 delta = point - model.origin;
     return {model.longitudinal.dot(delta), model.transverse.dot(delta)};
-}
-
-Vec3 liftToReference(const ReferenceModel &model, const Eigen::Vector2d &coordinate) {
-    Vec3 point = model.origin + model.longitudinal * coordinate.x() +
-                 model.transverse * coordinate.y();
-    const auto &plane = localPlane(model, point);
-    const double denominator = plane.normal.dot(model.depth);
-    if (std::abs(denominator) > 1e-8)
-        point -= model.depth * ((plane.normal.dot(point) + plane.d) / denominator);
-    else
-        point -= plane.normal * (plane.normal.dot(point) + plane.d);
-    return point;
 }
 
 std::vector<int> domainInliers(const std::vector<Point> &points,
@@ -867,137 +851,6 @@ SliceEvaluation evaluateSlice(const std::vector<Point> &points,
     return result;
 }
 
-std::vector<ProjectedPoint> project(const std::vector<Point> &points,
-                                    const ReferenceModel &reference,
-                                    const std::vector<int> &indices) {
-    std::vector<ProjectedPoint> result(indices.size());
-#ifdef BWB_HAS_OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-    for (long long i = 0; i < static_cast<long long>(indices.size()); ++i) {
-        const Point &source = points[std::size_t(indices[std::size_t(i)])];
-        result[std::size_t(i)] = {projectToReference(reference, source.xyz), source.source};
-    }
-    return result;
-}
-
-std::vector<ProjectedPoint> uniformTrajectory(const std::vector<ProjectedPoint> &points,
-                                              const ReferenceModel &reference,
-                                              double spacing) {
-    if (points.size() < 3)
-        return {};
-    std::vector<Eigen::Vector2d> xy;
-    xy.reserve(points.size());
-    Eigen::Vector2d mean = Eigen::Vector2d::Zero();
-    for (const auto &point : points) {
-        xy.push_back(flattenReference(reference, point.xyz));
-        mean += xy.back();
-    }
-    mean /= double(xy.size());
-    Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero();
-    for (const auto &point : xy) {
-        const auto delta = point - mean;
-        covariance.noalias() += delta * delta.transpose();
-    }
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(covariance);
-    if (solver.info() != Eigen::Success)
-        return {};
-    Eigen::Vector2d axis = solver.eigenvectors().col(1).normalized();
-    if (axis.x() < 0)
-        axis = -axis;
-    const Eigen::Vector2d cross(-axis.y(), axis.x());
-    std::vector<double> sValues;
-    sValues.reserve(xy.size());
-    for (const auto &point : xy)
-        sValues.push_back(axis.dot(point - mean));
-    const double low = quantile(sValues, 0.005);
-    const double high = quantile(sValues, 0.995);
-    const double binWidth = std::max(spacing * 0.5, 0.25);
-    // 以稳健范围的中心为锚点建立对称分箱。若从 low 单侧起箱，长度轴取反后
-    // 尾部的非整箱余量会落到另一端，导致同一几何多/少一个轨迹点。
-    const double rangeCenter = 0.5 * (low + high);
-    const double halfRange = std::max(0.0, 0.5 * (high - low));
-    const int binRadius = std::max(1, int(std::ceil(halfRange / binWidth)));
-    const int binCount = binRadius * 2 + 1;
-    auto transverse =
-        std::vector<std::vector<double>>(static_cast<std::size_t>(binCount));
-    auto sources =
-        std::vector<std::vector<std::uint32_t>>(static_cast<std::size_t>(binCount));
-    for (std::size_t i = 0; i < xy.size(); ++i) {
-        const double s = sValues[i];
-        const double centered = s - rangeCenter;
-        if (std::abs(centered) > halfRange)
-            continue;
-        const int bin = std::max(
-            0, std::min(binCount - 1,
-                        int(std::lround(centered / binWidth)) + binRadius));
-        transverse[std::size_t(bin)].push_back(cross.dot(xy[i] - mean));
-        sources[std::size_t(bin)].push_back(points[i].source);
-    }
-    struct Center { double s = 0, t = 0; std::uint32_t source = 0; };
-    std::vector<Center> centers;
-    centers.reserve(std::size_t(binCount));
-    for (int bin = 0; bin < binCount; ++bin) {
-        auto &values = transverse[std::size_t(bin)];
-        if (values.empty())
-            continue;
-        auto &sourceValues = sources[std::size_t(bin)];
-        const double median = quantile(values, 0.5);
-        std::size_t representative = 0;
-        for (std::size_t i = 1; i < values.size(); ++i)
-            if (std::abs(values[i] - median) <
-                std::abs(values[representative] - median))
-                representative = i;
-        centers.push_back({rangeCenter + (bin - binRadius) * binWidth, median,
-                           sourceValues[representative]});
-    }
-    if (centers.size() < 2)
-        return {};
-    // 三点中值抑制切片厚度造成的单箱毛刺，不改变持续弯折。
-    std::vector<double> smoothed(centers.size());
-    for (std::size_t i = 0; i < centers.size(); ++i) {
-        std::vector<double> window;
-        for (std::size_t j = i > 0 ? i - 1 : i;
-             j <= std::min(centers.size() - 1, i + 1); ++j)
-            window.push_back(centers[j].t);
-        smoothed[i] = quantile(window, 0.5);
-    }
-    for (std::size_t i = 0; i < centers.size(); ++i)
-        centers[i].t = smoothed[i];
-
-    std::vector<double> cumulative(centers.size(), 0.0);
-    for (std::size_t i = 1; i < centers.size(); ++i) {
-        const Eigen::Vector2d a = mean + axis * centers[i - 1].s + cross * centers[i - 1].t;
-        const Eigen::Vector2d b = mean + axis * centers[i].s + cross * centers[i].t;
-        cumulative[i] = cumulative[i - 1] + (b - a).norm();
-    }
-    if (cumulative.back() < spacing)
-        return {};
-    std::vector<ProjectedPoint> result;
-    // 用完整弧长等分并同时保留两端。若只从“低坐标端”按固定步长起采样，
-    // 长度轴符号翻转后会从另一端起步，余量会让整组轨迹点平移半个间距。
-    const int intervals = std::max(1, int(std::lround(cumulative.back() / spacing)));
-    const int count = intervals + 1;
-    result.reserve(std::size_t(count + 1));
-    std::size_t segment = 1;
-    for (int i = 0; i < count; ++i) {
-        const double target = cumulative.back() * double(i) / double(intervals);
-        while (segment < cumulative.size() - 1 && cumulative[segment] < target)
-            ++segment;
-        const double length = cumulative[segment] - cumulative[segment - 1];
-        const double ratio = length <= kEpsilon ? 0.0 :
-            (target - cumulative[segment - 1]) / length;
-        const double s = centers[segment - 1].s +
-                         ratio * (centers[segment].s - centers[segment - 1].s);
-        const double t = centers[segment - 1].t +
-                         ratio * (centers[segment].t - centers[segment - 1].t);
-        const Eigen::Vector2d coordinate = mean + axis * s + cross * t;
-        const Vec3 xyz = liftToReference(reference, coordinate);
-        result.push_back({xyz, centers[segment - 1].source});
-    }
-    return result;
-}
-
 double pointSegmentDistance(const Vec3 &point, const Vec3 &start, const Vec3 &end) {
     const Vec3 segment = end - start;
     const double lengthSquared = segment.squaredNorm();
@@ -1238,18 +1091,18 @@ FittedPolyline fitPolyline(const std::vector<ProjectedPoint> &points,
             fitStraightLine(points, fitted.anchors[i - 1], fitted.anchors[i]));
 
     fitted.corners.reserve(fitted.anchors.size());
-    fitted.corners.push_back(
-        {projectToLine(points.front().xyz, fitted.segments.front()),
-         points.front().source, true});
+    const auto appendCorner = [&](const ProjectedPoint &source, const Vec3 &position) {
+        auto point = source;
+        point.xyz = position;
+        point.corner = true;
+        fitted.corners.push_back(point);
+    };
+    appendCorner(points.front(), projectToLine(points.front().xyz, fitted.segments.front()));
     for (std::size_t i = 1; i + 1 < fitted.anchors.size(); ++i) {
         const auto &measured = points[fitted.anchors[i]];
-        fitted.corners.push_back(
-            {fittedCorner(fitted.segments[i - 1], fitted.segments[i], measured.xyz),
-             measured.source, true});
+        appendCorner(measured, fittedCorner(fitted.segments[i - 1], fitted.segments[i], measured.xyz));
     }
-    fitted.corners.push_back(
-        {projectToLine(points.back().xyz, fitted.segments.back()),
-         points.back().source, true});
+    appendCorner(points.back(), projectToLine(points.back().xyz, fitted.segments.back()));
     return fitted;
 }
 
@@ -1291,7 +1144,10 @@ std::vector<ProjectedPoint> projectMeasuredPoints(
                 continue;
             const Vec3 projected = start +
                 direction * direction.dot(measured[best].xyz - start);
-            result.push_back({projected, measured[best].source, false});
+            auto point = measured[best];
+            point.xyz = projected;
+            point.corner = false;
+            result.push_back(point);
             lastSelected = best;
         }
         // 转折点来自相邻整段拟合线的交点，必须原样进入白点序列。
@@ -1303,6 +1159,11 @@ std::vector<ProjectedPoint> projectMeasuredPoints(
 } // namespace
 
 std::string validateConfig(const Config &config) {
+    if (!std::isfinite(config.maxSurfaceExtrapolation) || config.maxSurfaceExtrapolation < 0.0 ||
+        !std::isfinite(config.surfaceFitTolerance) || config.surfaceFitTolerance <= 0.0 ||
+        config.minSurfacePoints < 6 || !std::isfinite(config.minIntersectionAngleDegrees) ||
+        config.minIntersectionAngleDegrees <= 0.0 || config.minIntersectionAngleDegrees >= 90.0)
+        return "表面求交参数无效：外推长度须非负，拟合容差须为正，支持点不少于6，交会角须在0至90度之间。";
     for (double offset : config.sliceOffsets)
         if (!std::isfinite(offset) || offset <= 0)
             return "切片偏移必须为正数。";
@@ -1470,16 +1331,17 @@ Result extract(const std::vector<Point> &points, const Config &config, const Hoo
     }
     reportProgress(hooks, 78);
 
-    result.projected = project(points, referenceModel, result.selectedIndices);
+    const bool intersected = recoverSurfaceIntersection(points, config, hooks, result);
+    if (result.cancelled) return result;
     if (!stage(hooks, 3, result)) {
         result.cancelled = true;
         return result;
     }
     reportProgress(hooks, 88);
-    result.trajectory = uniformTrajectory(result.projected, referenceModel,
-                                           config.trajectorySpacing);
+    if (!intersected) return result;
+    result.trajectory = resampleIntersection(result.projected, config.trajectorySpacing);
     if (result.trajectory.size() < 2) {
-        result.message = "候选点 B 已找到，但投影后无法生成连续均匀轨迹。";
+        result.message = "表面交线已找到，但无法生成连续均匀轨迹。";
         return result;
     }
     const auto fitted = fitPolyline(result.trajectory, config.lineFitTolerance);
@@ -1491,7 +1353,7 @@ Result extract(const std::vector<Point> &points, const Config &config, const Hoo
         return result;
     }
     result.ok = true;
-    result.message = "每个完整直线区段已整体拟合一次，并将选中的实测轨迹点统一投影到对应直线。";
+    result.message = "已恢复原始表面与基准面的交线，并完成整段直线拟合和白点采样。";
     if (!stage(hooks, 4, result)) {
         result.ok = false;
         result.cancelled = true;

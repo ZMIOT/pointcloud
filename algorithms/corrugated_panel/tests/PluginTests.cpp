@@ -33,7 +33,7 @@ pcl::PointCloud<pcl::PointXYZ> synthetic() {
             append(float(x), float(y), 0.0f);
     for (int x = -100; x <= 100; ++x) {
         const float wave = 22.0f * std::sin(float(x) / 18.0f);
-        for (int distance = 5; distance <= 35; ++distance) {
+        for (int distance = 1; distance <= 35; ++distance) {
             append(float(x), wave, float(distance));
             append(float(x), -48.0f, -float(distance));
         }
@@ -70,6 +70,16 @@ int main(int argc, char **argv) {
         const auto schema = plugin->parameterSchema();
         require(fw::Parameters::validateSchema(schema).isEmpty(), "invalid parameter schema");
         const auto parameters = fw::Parameters::defaults(schema);
+        require(schema.value("parameterVersion").toInt() == 3 &&
+                    plugin->descriptor().version == "1.6.0", "plugin version mismatch");
+        fw::ParameterSet old{{"trajectory_spacing", 3.0}}, migrated;
+        QString migrationError;
+        require(plugin->migrateParameters(2, old, migrated, migrationError) &&
+                    migrated.value("trajectory_spacing").toDouble() == 3.0 &&
+                    migrated.value("max_surface_extrapolation").toDouble() == 5.0,
+                "parameter migration must preserve old settings and add defaults");
+        require(!plugin->migrateParameters(99, old, migrated, migrationError),
+                "unknown parameter version must not migrate");
         require(fw::Parameters::validate(schema, parameters).isEmpty(),
                 "default parameters are invalid");
 
@@ -109,8 +119,8 @@ int main(int argc, char **argv) {
                 "A/B/C/measured-curve/fitted-line/white-point outputs are required");
         require(result.outputs[0].name == QStringLiteral("A 基准面"), "A output missing");
         require(result.outputs[1].name == QStringLiteral("B 最佳切片"), "B output missing");
-        require(result.outputs[2].name == QStringLiteral("C 投影候选点"), "C output missing");
-        require(result.outputs[3].name == QStringLiteral("实测曲线（C 恢复）"),
+        require(result.outputs[2].name == QStringLiteral("C 表面交线候选点"), "C output missing");
+        require(result.outputs[3].name == QStringLiteral("求交恢复曲线"),
                 "measured curve output missing");
         require(result.outputs[4].name == QStringLiteral("拟合直线控制点"),
                 "fitted line output missing");
@@ -118,6 +128,14 @@ int main(int argc, char **argv) {
                 "white point output missing");
         require(fw::hasFields(result.outputs[2], {"x", "y", "z", "source_index"}),
                 "C metadata missing");
+        for (int i = 2; i < 6; ++i)
+            require(fw::hasFields(result.outputs[i], {"reference_index", "is_extrapolated",
+                        "extrapolation_distance", "surface_rms", "support_count", "surface_degree"}),
+                    "surface provenance missing");
+        const auto intersection = result.metrics.value("surface_intersection").toObject();
+        require(intersection.value("stations").toInt() > 0 &&
+                    intersection.value("stations") == intersection.value("valid_stations"),
+                "intersection station metrics missing");
         require(fw::hasFields(result.outputs[3], {"x", "y", "z", "source_index"}),
                 "measured curve metadata missing");
         require(fw::hasFields(result.outputs[4], {"x", "y", "z", "source_index"}),
@@ -129,7 +147,7 @@ int main(int argc, char **argv) {
                 "measured curve and fitted line must remain separate outputs");
         const auto measuredLayer = std::find_if(
             result.layers.cbegin(), result.layers.cend(), [](const fw::DebugLayer &layer) {
-                return layer.name == QStringLiteral("实测曲线（C 恢复）") &&
+                return layer.name == QStringLiteral("求交恢复曲线") &&
                        layer.geometry.kind == fw::GeometryKind::Polyline;
             });
         const auto fittedLayer = std::find_if(
@@ -154,6 +172,14 @@ int main(int argc, char **argv) {
             require(output.coordinateFrame == data.coordinateFrame && output.unit == data.unit,
                     "coordinate frame or unit was lost");
         require(normal.checkpoints == 0, "debug-disabled execution emitted checkpoints");
+        auto noExtrapolation = parameters;
+        noExtrapolation["max_surface_extrapolation"] = 0.0;
+        Context failureContext;
+        const auto unsupported = algorithm->execute(input, noExtrapolation, failureContext);
+        require(unsupported.status == fw::ResultStatus::Failed && unsupported.outputs.empty() &&
+                    unsupported.metrics.value("surface_intersection").toObject()
+                        .value("failure_counts").toObject().contains("surface_extrapolation_limit"),
+                "unsupported recovery must expose failure evidence without formal trajectory outputs");
 
         // 同一真实样本还需经过插件的 float 点云转换，避免仅验证 double 核心。
         for (const char *sampleVariable : {"BWB_SAMPLE_6_PATH", "BWB_SAMPLE_52_PATH"}) {

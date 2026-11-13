@@ -19,7 +19,9 @@ void require(bool condition, const char *message) {
 // 这些阈值防止已观测到的局部错面回退，不是带人工标注的精度验收。
 int main(int argc, char **argv) {
     const bool sample52 = argc > 1 && std::string(argv[1]) == "52";
-    const char *variable = sample52 ? "BWB_SAMPLE_52_PATH" : "BWB_SAMPLE_6_PATH";
+    const bool sample121 = argc > 1 && std::string(argv[1]) == "121";
+    const char *variable = sample121 ? "BWB_SAMPLE_121_PATH" :
+        (sample52 ? "BWB_SAMPLE_52_PATH" : "BWB_SAMPLE_6_PATH");
     const char *path = std::getenv(variable);
     if (!path || !*path) {
         std::cout << "SKIP: set " << variable << " to the original sample\n";
@@ -35,10 +37,35 @@ int main(int argc, char **argv) {
         double x = 0, y = 0, z = 0;
         while (input >> index >> x >> y >> z)
             points.push_back({bwb::Vec3(x, y, z), std::uint32_t(points.size())});
-        require(input.eof() && points.size() == (sample52 ? 831069u : 1309174u),
+        require(input.eof() && points.size() == (sample121 ? 4238245u : (sample52 ? 831069u : 1309174u)),
                 "unexpected real-sample point count");
         const bwb::Config config;
         const auto result = bwb::extract(points, config);
+        if (sample121) {
+            // This is a safety regression, not an assertion that 121 is recovered.
+            // Allow future valid recovery, but never accept unsafe gap bridging.
+            require(result.referenceSegments.size() == 6, "121 local A count regressed");
+            for (const auto &a : result.referenceSegments)
+                require(a.indices.size() > 150000 && a.planeRms < 0.25,
+                        "121 local A support/residual regressed");
+            require(result.intersectionStations.size() > 1000 && !result.projected.empty(),
+                    "121 surface evidence missing");
+            if (!result.ok) {
+                require(result.trajectory.empty() && result.fittedLine.empty() && result.whitePoints.empty(),
+                        "failed 121 recovery generated a complete trajectory");
+                require(std::any_of(result.intersectionStations.begin(), result.intersectionStations.end(),
+                            [](const bwb::IntersectionStation &s) { return !s.valid && !s.failure.empty(); }),
+                        "121 failure has no located evidence");
+                std::cout << "121.txt NOT fully recovered; safety rejection verified: " << result.message << '\n';
+            } else {
+                require(std::all_of(result.intersectionStations.begin(), result.intersectionStations.end(),
+                            [&](const bwb::IntersectionStation &s) {
+                                return s.valid && s.point.surfaceRms <= config.surfaceFitTolerance &&
+                                    s.point.extrapolationDistance <= config.maxSurfaceExtrapolation;
+                            }), "121 recovery bypassed quality gates");
+            }
+            return 0;
+        }
         require(result.ok, result.message.c_str());
         require(result.referenceSegments.size() == 2, "sample must produce A1 and A2");
         for (const auto &segment : result.referenceSegments) {
@@ -83,11 +110,10 @@ int main(int argc, char **argv) {
             require(oppositeStraight, "52.txt has no supported opposite straight side");
         }
         for (const auto &point : result.projected) {
-            const auto &original = points[point.source].xyz;
-            const double coordinate = result.referenceLongitudinal.dot(
-                original - result.referenceOrigin);
-            const auto &plane = result.referenceSegments[
-                coordinate <= result.referenceSegments[0].longitudinalMax ? 0 : 1].plane;
+            require(point.referenceIndex < result.referenceSegments.size(), "invalid intersection owner");
+            const auto &plane = result.referenceSegments[point.referenceIndex].plane;
+            require(point.supportCount >= 20 && point.extrapolationDistance <= 5.0 &&
+                        point.surfaceRms <= 0.6, "unsupported surface intersection");
             require(std::abs(plane.normal.dot(point.xyz) + plane.d) < 1e-7,
                     "projected point does not lie on its owning A plane");
         }

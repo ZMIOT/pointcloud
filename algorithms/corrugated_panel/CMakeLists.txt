@@ -19,6 +19,7 @@ find_package(OpenMP QUIET)
 
 add_library(CorrugatedPanelCore STATIC
   core/CorrugatedPanel.cpp
+  core/SurfaceIntersection.cpp
   core/CorrugatedPanel.h)
 target_include_directories(CorrugatedPanelCore PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core>
@@ -31,8 +32,8 @@ endif()
 framework_add_plugin(CorrugatedPanelAlgorithm TYPE algorithm
   ID custom.corrugatedPanelFeature
   ALGORITHM_ID custom.corrugatedPanelFeature
-  VERSION 1.5.4
-  PARAMETER_VERSION 2
+  VERSION 1.6.0
+  PARAMETER_VERSION 3
   SOURCES MyAlgorithm.cpp parameters.qrc)
 target_link_libraries(CorrugatedPanelAlgorithm PRIVATE CorrugatedPanelCore)
 
@@ -41,6 +42,9 @@ target_link_libraries(CorrugatedPanelInspect PRIVATE CorrugatedPanelCore)
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(CorrugatedPanelIntersectionTests tests/IntersectionTests.cpp)
+  target_link_libraries(CorrugatedPanelIntersectionTests PRIVATE CorrugatedPanelCore)
+  add_test(NAME corrugated_panel_intersection COMMAND CorrugatedPanelIntersectionTests)
   add_executable(CorrugatedPanelCoreTests tests/CoreTests.cpp)
   target_link_libraries(CorrugatedPanelCoreTests PRIVATE CorrugatedPanelCore)
   add_test(NAME corrugated_panel_core COMMAND CorrugatedPanelCoreTests)
@@ -50,6 +54,8 @@ if(BUILD_TESTING)
   set_tests_properties(corrugated_panel_sample6 PROPERTIES SKIP_RETURN_CODE 77)
   add_test(NAME corrugated_panel_sample52 COMMAND CorrugatedPanelRealSampleTests 52)
   set_tests_properties(corrugated_panel_sample52 PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(NAME corrugated_panel_sample121_safety COMMAND CorrugatedPanelRealSampleTests 121)
+  set_tests_properties(corrugated_panel_sample121_safety PROPERTIES SKIP_RETURN_CODE 77)
   add_executable(CorrugatedPanelPluginTests tests/PluginTests.cpp)
   target_link_libraries(CorrugatedPanelPluginTests PRIVATE Framework::SDK pcl_common)
   target_compile_definitions(CorrugatedPanelPluginTests PRIVATE

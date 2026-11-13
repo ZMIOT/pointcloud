@@ -32,6 +32,10 @@ struct Config {
     double trajectorySpacing = 2.0;
     double lineFitTolerance = 3.0;
     double whitePointSpacing = 10.0;
+    double maxSurfaceExtrapolation = 5.0;
+    double surfaceFitTolerance = 0.6;
+    int minSurfacePoints = 20;
+    double minIntersectionAngleDegrees = 10.0;
     int threads = 0; // 0: OpenMP runtime default
 };
 
@@ -73,6 +77,21 @@ struct ProjectedPoint {
     Vec3 xyz = Vec3::Zero();
     std::uint32_t source = 0;
     bool corner = false;
+    std::uint32_t referenceIndex = 0;
+    bool extrapolated = false;
+    double extrapolationDistance = 0.0;
+    double surfaceRms = 0.0;
+    std::uint32_t supportCount = 0;
+    int surfaceDegree = 0;
+};
+
+struct IntersectionStation {
+    double longitudinal = 0.0;
+    ProjectedPoint point;
+    Vec3 longitudinalTangent = Vec3::Zero();
+    double boundaryIntersectionGap = 0.0;
+    bool valid = false;
+    std::string failure;
 };
 
 struct Result {
@@ -88,16 +107,17 @@ struct Result {
     std::vector<SliceEvaluation> slices;
     int selectedSlice = -1;
     std::vector<int> selectedIndices;
-    std::vector<ProjectedPoint> projected;
-    std::vector<ProjectedPoint> trajectory; // C 的稠密中心轨迹
-    std::vector<ProjectedPoint> fittedLine; // RDP 分段后正交最小二乘拟合的直线角点
-    std::vector<ProjectedPoint> whitePoints; // 真实轨迹点采样后投影到整段拟合直线
+    std::vector<ProjectedPoint> projected; // Legacy member name; now surface/A intersection candidates.
+    std::vector<IntersectionStation> intersectionStations;
+    std::vector<ProjectedPoint> trajectory; // 求交恢复曲线，不是直接实测点
+    std::vector<ProjectedPoint> fittedLine; // 坡段整体直线拟合角点
+    std::vector<ProjectedPoint> whitePoints; // 恢复曲线采样后投影到整段拟合直线
 };
 
 struct Hooks {
     std::function<bool()> cancelled;
     std::function<void(int)> progress;
-    // 0 reference plane, 1 slices, 2 selected B, 3 projected C, 4 fitted line/white points.
+    // 0 reference plane, 1 slices, 2 selected B, 3 intersection C, 4 fitted line/white points.
     std::function<bool(int, const Result &)> stage;
     std::function<void(const Plane &, std::size_t, std::size_t, std::size_t, double,
                        double, double)>

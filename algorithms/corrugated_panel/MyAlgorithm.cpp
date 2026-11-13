@@ -43,6 +43,10 @@ bwb::Config configuration(const fw::ParameterSet &parameters) {
     config.trajectorySpacing = parameters["trajectory_spacing"].toDouble(2.0);
     config.lineFitTolerance = parameters["line_fit_tolerance"].toDouble(3.0);
     config.whitePointSpacing = parameters["white_point_spacing"].toDouble(10.0);
+    config.maxSurfaceExtrapolation = parameters["max_surface_extrapolation"].toDouble(5.0);
+    config.surfaceFitTolerance = parameters["surface_fit_tolerance"].toDouble(0.6);
+    config.minSurfacePoints = parameters["min_surface_points"].toInt(20);
+    config.minIntersectionAngleDegrees = parameters["min_intersection_angle"].toDouble(10.0);
     config.threads = parameters["threads"].toInt(0);
     return config;
 }
@@ -70,8 +74,14 @@ fw::CloudData generatedCloud(const fw::CloudData &input,
     const std::pair<const char *, std::uint8_t> definitions[] = {
         {"x", pcl::PCLPointField::FLOAT32}, {"y", pcl::PCLPointField::FLOAT32},
         {"z", pcl::PCLPointField::FLOAT32}, {"source_index", pcl::PCLPointField::UINT32},
-        {"is_corner", pcl::PCLPointField::UINT32}};
-    for (std::size_t i = 0; i < 5; ++i) {
+        {"is_corner", pcl::PCLPointField::UINT32},
+        {"reference_index", pcl::PCLPointField::UINT32},
+        {"is_extrapolated", pcl::PCLPointField::UINT32},
+        {"extrapolation_distance", pcl::PCLPointField::FLOAT32},
+        {"surface_rms", pcl::PCLPointField::FLOAT32},
+        {"support_count", pcl::PCLPointField::UINT32},
+        {"surface_degree", pcl::PCLPointField::UINT32}};
+    for (std::size_t i = 0; i < 11; ++i) {
         pcl::PCLPointField field;
         field.name = definitions[i].first;
         field.offset = std::uint32_t(i * 4);
@@ -81,19 +91,29 @@ fw::CloudData generatedCloud(const fw::CloudData &input,
     }
     cloud->height = 1;
     cloud->width = std::uint32_t(points.size());
-    cloud->point_step = 20;
+    cloud->point_step = 44;
     cloud->row_step = cloud->point_step * cloud->width;
     cloud->is_dense = true;
     cloud->is_bigendian = false;
     cloud->data.resize(cloud->row_step);
     for (std::size_t i = 0; i < points.size(); ++i) {
-        auto *destination = cloud->data.data() + i * 20;
+        auto *destination = cloud->data.data() + i * cloud->point_step;
         const float xyz[] = {float(points[i].xyz.x()), float(points[i].xyz.y()),
                              float(points[i].xyz.z())};
         std::memcpy(destination, xyz, sizeof(xyz));
         std::memcpy(destination + 12, &points[i].source, sizeof(points[i].source));
         const std::uint32_t corner = points[i].corner ? 1u : 0u;
         std::memcpy(destination + 16, &corner, sizeof(corner));
+        std::memcpy(destination + 20, &points[i].referenceIndex, 4);
+        const std::uint32_t extrapolated = points[i].extrapolated ? 1u : 0u;
+        const float distance = float(points[i].extrapolationDistance);
+        const float rms = float(points[i].surfaceRms);
+        const std::uint32_t degree = std::uint32_t(points[i].surfaceDegree);
+        std::memcpy(destination + 24, &extrapolated, 4);
+        std::memcpy(destination + 28, &distance, 4);
+        std::memcpy(destination + 32, &rms, 4);
+        std::memcpy(destination + 36, &points[i].supportCount, 4);
+        std::memcpy(destination + 40, &degree, 4);
     }
     fw::CloudData output = input;
     output.id = input.id + id;
@@ -103,6 +123,28 @@ fw::CloudData generatedCloud(const fw::CloudData &input,
 }
 
 QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
+    QJsonObject failureCounts;
+    QJsonArray failedStations;
+    int validStations = 0, quadraticStations = 0;
+    double maxRms = 0, maxExtrapolation = 0, maxBoundaryGap = 0;
+    for (const auto &station : result.intersectionStations) {
+        maxBoundaryGap = std::max(maxBoundaryGap, station.boundaryIntersectionGap);
+        if (station.valid) {
+            ++validStations;
+            quadraticStations += station.point.surfaceDegree == 2 ? 1 : 0;
+            maxRms = std::max(maxRms, station.point.surfaceRms);
+            maxExtrapolation = std::max(maxExtrapolation, station.point.extrapolationDistance);
+        } else {
+            const QString reason = QString::fromStdString(station.failure);
+            failureCounts[reason] = failureCounts.value(reason).toInt() + 1;
+            if (failedStations.size() < 128)
+                failedStations.append(QJsonObject{{"longitudinal", station.longitudinal},
+                    {"reference_index", int(station.point.referenceIndex)}, {"reason", reason},
+                    {"surface_rms", station.point.surfaceRms},
+                    {"support_count", int(station.point.supportCount)},
+                    {"extrapolation_distance", station.point.extrapolationDistance}});
+        }
+    }
     QJsonArray coefficients{result.reference.normal.x(), result.reference.normal.y(),
                             result.reference.normal.z(), result.reference.d};
     QJsonArray slices;
@@ -152,6 +194,15 @@ QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
                                              segment.plane.d}}});
     }
     return {{"algorithm_elapsed_ms", double(elapsedMs)},
+            {"surface_intersection", QJsonObject{
+                {"method", "connected_surface_local_section_fit"},
+                {"point_provenance", "restored_intersection_not_direct_measurement"},
+                {"stations", int(result.intersectionStations.size())},
+                {"valid_stations", validStations}, {"quadratic_stations", quadraticStations},
+                {"max_valid_rms", maxRms}, {"max_valid_extrapolation", maxExtrapolation},
+                {"max_boundary_intersection_gap", maxBoundaryGap},
+                {"failure_counts", failureCounts}, {"failed_stations", failedStations},
+                {"failed_stations_truncated", int(result.intersectionStations.size())-validStations > 128}}},
             {"coordinate_normalization", "local_right_handed_orthonormal_frames"},
             {"reference_frame",
              QJsonObject{{"origin", QJsonArray{result.referenceOrigin.x(),
@@ -269,10 +320,11 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
                 const QStringList titles = {QStringLiteral("提取局部基准面 A1…An"),
                                             QStringLiteral("双侧切片评估"),
                                             QStringLiteral("选择候选点云 B"),
-                                            QStringLiteral("投影候选点 C"),
+                                            QStringLiteral("原始表面与基准面求交 C"),
                                             QStringLiteral("直线拟合与白点投影")};
                 frame.stepId = QStringLiteral("corrugated_%1").arg(stageIndex);
                 frame.title = titles[stageIndex];
+                if (stageIndex == 3) frame.metrics = resultMetrics(partial, 0);
                 auto background = fw::DebugLayer::background(QStringLiteral("原始点云"),
                                                               sourceCloud);
                 background.style.opacity = 0.25;
@@ -295,12 +347,12 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
                 }
                 if (!partial.projected.empty()) {
                     const auto cloud = generatedCloud(sourceCloud, partial.projected, "_debug_c",
-                                                      QStringLiteral("C 投影点"));
-                    frame.layers.push_back(styled(QStringLiteral("C 投影点"), cloud,
+                                                      QStringLiteral("C 表面交线候选点"));
+                    frame.layers.push_back(styled(QStringLiteral("C 表面交线候选点"), cloud,
                                                   {0.2, 0.7, 1.0}, 4));
                 }
                 addPolyline(frame.layers, partial.trajectory,
-                            QStringLiteral("实测曲线（C 恢复）"),
+                            QStringLiteral("求交恢复曲线"),
                             {0.1, 0.95, 0.35}, 2);
                 addPolyline(frame.layers, partial.fittedLine,
                             QStringLiteral("拟合直线"),
@@ -333,10 +385,10 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
         auto selected = indexedCloud(sourceCloud, points, extracted.selectedIndices, "_b",
                                      QStringLiteral("B 最佳切片"));
         auto projected = generatedCloud(sourceCloud, extracted.projected, "_c",
-                                        QStringLiteral("C 投影候选点"));
+                                        QStringLiteral("C 表面交线候选点"));
         auto measuredCurve = generatedCloud(sourceCloud, extracted.trajectory,
                                              "_measured_curve",
-                                             QStringLiteral("实测曲线（C 恢复）"));
+                                             QStringLiteral("求交恢复曲线"));
         auto fittedLine = generatedCloud(sourceCloud, extracted.fittedLine, "_fitted_line",
                                          QStringLiteral("拟合直线控制点"));
         auto whitePoints = generatedCloud(sourceCloud, extracted.whitePoints, "_white_points",
@@ -344,7 +396,7 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
         fw::AlgorithmResult output;
         output.outputs = {plane, selected, projected, measuredCurve, fittedLine, whitePoints};
         output.message = QStringLiteral(
-            "每个完整区段只拟合一条直线；白点来自实测轨迹并统一投影到该直线，同时保留全部角点。");
+            "已沿原始表面恢复与基准面的交线；白点由恢复曲线采样并投到整段拟合直线，不是直接实测交点。");
         output.metrics = resultMetrics(extracted, elapsed);
         auto background = fw::DebugLayer::background(QStringLiteral("原始点云"), sourceCloud);
         background.style.opacity = 0.2;
@@ -359,7 +411,7 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
             addReferenceLayers(output.layers, sourceCloud, points,
                                extracted.referenceSegments, QStringLiteral("_a_segment"));
         addPolyline(output.layers, extracted.trajectory,
-                    QStringLiteral("实测曲线（C 恢复）"),
+                    QStringLiteral("求交恢复曲线"),
                     {0.1, 0.95, 0.35}, 2);
         addPolyline(output.layers, extracted.fittedLine,
                     QStringLiteral("拟合直线"),
@@ -387,10 +439,20 @@ class CorrugatedPanelPlugin final : public QObject, public fw::IAlgorithmPlugin 
     fw::AlgorithmDescriptor descriptor() const override {
         return {"custom.corrugatedPanelFeature",
                 QStringLiteral("波纹板特征提取：竖直放置"),
-                "1.5.4",
+                "1.6.0",
                 {"x", "y", "z"}};
     }
     QJsonObject parameterSchema() const override { return schema(); }
+    bool migrateParameters(int fromVersion, const fw::ParameterSet &old,
+                           fw::ParameterSet &updated, QString &error) const override {
+        if (fromVersion != 1 && fromVersion != 2) {
+            error = QStringLiteral("只支持从参数版本 1 或 2 迁移。");
+            return false;
+        }
+        updated = fw::Parameters::merge(schema(), old);
+        error = fw::Parameters::validate(schema(), updated).join('\n');
+        return error.isEmpty();
+    }
     fw::IAlgorithm *create() override { return new CorrugatedPanelAlgorithm; }
     void destroy(fw::IAlgorithm *algorithm) override { delete algorithm; }
 };
