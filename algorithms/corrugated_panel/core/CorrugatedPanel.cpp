@@ -1027,52 +1027,52 @@ struct FittedPolyline {
     std::vector<ProjectedPoint> corners;
 };
 
-Vec3 projectToLine(const Vec3 &point, const FittedSegment &line) {
-    return line.origin + line.direction * line.direction.dot(point - line.origin);
-}
-
-FittedSegment fitStraightLine(const std::vector<ProjectedPoint> &points,
-                              std::size_t first, std::size_t last) {
-    FittedSegment line;
-    for (std::size_t i = first; i <= last; ++i)
-        line.origin += points[i].xyz;
-    line.origin /= double(last - first + 1);
-
-    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
-    for (std::size_t i = first; i <= last; ++i) {
-        const Vec3 delta = points[i].xyz - line.origin;
-        covariance.noalias() += delta * delta.transpose();
+void refineSlopeTransitions(const std::vector<ProjectedPoint> &points,
+                            std::vector<std::size_t> &anchors) {
+    if (anchors.size() < 3) return;
+    // Keep the phase count fixed. Only locate each transition more precisely;
+    // a bent continuous uphill/downhill phase must never create extra segments.
+    const auto coarse = anchors;
+    for (std::size_t phase = 1; phase + 1 < coarse.size(); ++phase) {
+        // Midpoint windows can exclude the real turn on a short terminal slope.
+        // Fit across both adjacent phases, but keep the resulting boundary in
+        // its own non-overlapping coarse-phase cell.
+        const std::size_t first = coarse[phase-1];
+        const std::size_t last = coarse[phase+1];
+        if (last <= first + 6) continue;
+        // Local centering avoids loss of precision after large world translations.
+        std::vector<Vec3> sums(last-first+2, Vec3::Zero());
+        std::vector<Eigen::Matrix3d> products(last-first+2, Eigen::Matrix3d::Zero());
+        for (std::size_t i = first; i <= last; ++i) {
+            const Vec3 p = points[i].xyz - points[first].xyz;
+            const auto j = i-first+1;
+            sums[j] = sums[j-1] + p;
+            products[j] = products[j-1] + p*p.transpose();
+        }
+        const auto lineError = [&](std::size_t lo, std::size_t hi) {
+            const Vec3 sum = sums[hi-first+1] - sums[lo-first];
+            const Eigen::Matrix3d scatter = products[hi-first+1] - products[lo-first] -
+                sum*sum.transpose()/double(hi-lo+1);
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(scatter, Eigen::EigenvaluesOnly);
+            if (solver.info() != Eigen::Success) return std::numeric_limits<double>::infinity();
+            return std::max(0.0, solver.eigenvalues()[0] + solver.eigenvalues()[1]);
+        };
+        double bestError = std::numeric_limits<double>::infinity();
+        std::size_t best = coarse[phase];
+        const std::size_t searchFirst = phase == 1 ? first+3 :
+            std::max(first+3, (first+coarse[phase])/2+1);
+        const std::size_t searchLast = phase+2 == coarse.size() ? last-3 :
+            std::min(last-3, (coarse[phase]+last)/2);
+        for (std::size_t split = searchFirst; split <= searchLast; ++split) {
+            const double error = lineError(first, split) + lineError(split, last);
+            if (error < bestError-1e-9 ||
+                (std::abs(error-bestError) <= 1e-9 && points[split].source < points[best].source)) {
+                bestError = error;
+                best = split;
+            }
+        }
+        anchors[phase] = best;
     }
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
-    const Vec3 chord = points[last].xyz - points[first].xyz;
-    if (solver.info() == Eigen::Success)
-        line.direction = solver.eigenvectors().col(2).normalized();
-    else if (chord.squaredNorm() > kEpsilon)
-        line.direction = chord.normalized();
-    if (line.direction.dot(chord) < 0.0)
-        line.direction = -line.direction;
-    return line;
-}
-
-Vec3 fittedCorner(const FittedSegment &left, const FittedSegment &right,
-                  const Vec3 &measuredCorner) {
-    const double parallel = left.direction.dot(right.direction);
-    const double denominator = 1.0 - parallel * parallel;
-    if (denominator <= 1e-8) {
-        return 0.5 * (projectToLine(measuredCorner, left) +
-                      projectToLine(measuredCorner, right));
-    }
-
-    const Vec3 between = left.origin - right.origin;
-    const double leftOffset = left.direction.dot(between);
-    const double rightOffset = right.direction.dot(between);
-    const double leftParameter =
-        (parallel * rightOffset - leftOffset) / denominator;
-    const double rightParameter =
-        (rightOffset - parallel * leftOffset) / denominator;
-    const Vec3 onLeft = left.origin + leftParameter * left.direction;
-    const Vec3 onRight = right.origin + rightParameter * right.direction;
-    return 0.5 * (onLeft + onRight);
 }
 
 FittedPolyline fitPolyline(const std::vector<ProjectedPoint> &points,
@@ -1083,26 +1083,24 @@ FittedPolyline fitPolyline(const std::vector<ProjectedPoint> &points,
     fitted.anchors = slopePhaseAnchors(points, tolerance);
     if (fitted.anchors.size() < 2)
         return fitted;
+    refineSlopeTransitions(points, fitted.anchors);
 
-    // RDP 只负责确定完整直线区段；每个区段只使用全部实测点拟合一次。
+    // The identified slope endpoints define exactly one segment per phase.
+    // Do not relocate them using intersections of infinite best-fit lines.
     fitted.segments.reserve(fitted.anchors.size() - 1);
-    for (std::size_t i = 1; i < fitted.anchors.size(); ++i)
-        fitted.segments.push_back(
-            fitStraightLine(points, fitted.anchors[i - 1], fitted.anchors[i]));
-
     fitted.corners.reserve(fitted.anchors.size());
-    const auto appendCorner = [&](const ProjectedPoint &source, const Vec3 &position) {
-        auto point = source;
-        point.xyz = position;
+    for (std::size_t i = 0; i < fitted.anchors.size(); ++i) {
+        auto point = points[fitted.anchors[i]];
         point.corner = true;
         fitted.corners.push_back(point);
-    };
-    appendCorner(points.front(), projectToLine(points.front().xyz, fitted.segments.front()));
-    for (std::size_t i = 1; i + 1 < fitted.anchors.size(); ++i) {
-        const auto &measured = points[fitted.anchors[i]];
-        appendCorner(measured, fittedCorner(fitted.segments[i - 1], fitted.segments[i], measured.xyz));
+        if (i > 0) {
+            FittedSegment segment;
+            segment.origin = fitted.corners[i-1].xyz;
+            const Vec3 delta = point.xyz - segment.origin;
+            if (delta.squaredNorm() > kEpsilon) segment.direction = delta.normalized();
+            fitted.segments.push_back(segment);
+        }
     }
-    appendCorner(points.back(), projectToLine(points.back().xyz, fitted.segments.back()));
     return fitted;
 }
 
@@ -1150,7 +1148,7 @@ std::vector<ProjectedPoint> projectMeasuredPoints(
             result.push_back(point);
             lastSelected = best;
         }
-        // 转折点来自相邻整段拟合线的交点，必须原样进入白点序列。
+        // 坡段拐点来自恢复曲线，必须原样进入白点序列。
         result.push_back(line.corners[segment + 1]);
     }
     return result;

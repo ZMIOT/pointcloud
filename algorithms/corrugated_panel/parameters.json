@@ -14,7 +14,7 @@
         {"id":"slice_thickness","type":"double","label":"切片厚度","default":3.0,"min":0.05,"max":100.0,"step":0.5,"decimals":3},
         {"id":"bend_deviation","type":"double","label":"弯折判定偏差","default":2.0,"min":0.01,"max":100.0,"step":0.2,"decimals":3,"description":"切片主轴拟合后 90% 点的横向偏差达到该值才判为弯折。"},
         {"id":"trajectory_spacing","type":"double","label":"拟合前中心轨迹间距","default":2.0,"min":0.01,"max":100.0,"step":0.2,"decimals":3},
-        {"id":"line_fit_tolerance","type":"double","label":"坡段合并容差","default":3.0,"min":0.001,"max":100.0,"step":0.5,"decimals":3,"description":"根据特征曲线的平滑切向斜率划分水平、上坡和下坡；连续同类区段只拟合一条直线。越大越能忽略小幅斜率波动。"},
+        {"id":"line_fit_tolerance","type":"double","label":"坡段合并容差","default":3.0,"min":0.001,"max":100.0,"step":0.5,"decimals":3,"description":"根据平滑切向斜率识别水平、上坡和下坡，一坡一段；细化转换位置后连接恢复曲线上的起止点。越大越能忽略小幅斜率波动，不增加坡内分段。"},
         {"id":"white_point_spacing","type":"double","label":"白色点目标间距","default":10.0,"min":0.01,"max":1000.0,"step":1.0,"decimals":3,"description":"按目标间距从特征曲线选择采样点，再统一正交投影到对应的整段拟合直线；包含全部转折点。"}
       ]
     },

@@ -366,8 +366,8 @@ void corrugatedSideIsSelected() {
                     return (fitted.xyz - measured.xyz).norm() < 1e-8;
                 });
         });
-    require(fittedAwayFromSamples,
-            "fitted line must be orthogonally refitted instead of reusing RDP samples");
+    require(!fittedAwayFromSamples,
+            "slope control points must be located on the recovered curve");
     require(result.whitePoints.size() > 10,
             "white points must be distributed along the fitted line");
     for (const auto &point : result.trajectory)
@@ -712,11 +712,38 @@ void slopePhasesUseOneLineEach() {
     require(result.ok, result.message);
     require(result.fittedLine.size() == 6,
             "horizontal/up/horizontal/down/horizontal must produce exactly five lines");
+    const double expectedTurns[] = {-80.0, -20.0, 20.0, 80.0};
+    for (std::size_t i = 0; i < 4; ++i)
+        require(std::abs(result.fittedLine[i+1].xyz.x()-expectedTurns[i]) < 3.0,
+                "slope transition is displaced from the known turn");
+    require((result.fittedLine.front().xyz-result.trajectory.front().xyz).norm() < 1e-10 &&
+                (result.fittedLine.back().xyz-result.trajectory.back().xyz).norm() < 1e-10,
+            "slope endpoints must preserve the recovered curve endpoints");
+    for (const auto &corner : result.fittedLine)
+        require(std::any_of(result.trajectory.begin(), result.trajectory.end(),
+                           [&](const bwb::ProjectedPoint &p) {
+                               return (p.xyz-corner.xyz).norm() < 1e-10;
+                           }), "slope control points must stay on the recovered curve");
     require(std::count_if(result.whitePoints.begin(), result.whitePoints.end(),
                           [](const bwb::ProjectedPoint &point) {
                               return point.corner;
                           }) == 6,
             "all five phase transitions and endpoints must remain in white points");
+
+    auto truncated = piecewiseSlopeCloud();
+    truncated.erase(std::remove_if(truncated.begin(), truncated.end(),
+                                  [](const Point &p) {
+                                      return std::abs(p.xyz.x()) > 42.0 && std::abs(p.xyz.z()) > 0.2;
+                                  }),
+                    truncated.end());
+    const auto tail = bwb::extract(truncated, config);
+    require(tail.ok, tail.message);
+    require(tail.fittedLine.size() == 4,
+            "a short terminal downhill must remain one complete phase");
+    require(std::abs(tail.fittedLine[2].xyz.x()-20.0) < 3.0,
+            "terminal downhill starts before the known turn");
+    require((tail.fittedLine.back().xyz-tail.trajectory.back().xyz).norm() < 1e-10,
+            "terminal downhill endpoint must not move");
 }
 
 } // namespace

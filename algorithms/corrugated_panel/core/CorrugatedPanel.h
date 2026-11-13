@@ -122,7 +122,7 @@ struct Result {
     double bodyBandMin = 0.0;
     double bodyBandMax = 0.0;
     std::vector<ProjectedPoint> trajectory; // 求交恢复或全局投影回退曲线，不是直接实测点
-    std::vector<ProjectedPoint> fittedLine; // 坡段整体直线拟合角点
+    std::vector<ProjectedPoint> fittedLine; // 恢复曲线上的坡段起止控制点，一坡一段
     std::vector<ProjectedPoint> whitePoints; // 恢复曲线采样后投影到整段拟合直线
 };
 

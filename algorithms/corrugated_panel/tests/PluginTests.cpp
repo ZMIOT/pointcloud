@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
         require(fw::Parameters::validateSchema(schema).isEmpty(), "invalid parameter schema");
         const auto parameters = fw::Parameters::defaults(schema);
         require(schema.value("parameterVersion").toInt() == 5 &&
-                    plugin->descriptor().version == "1.7.0", "plugin version mismatch");
+                    plugin->descriptor().version == "1.7.1", "plugin version mismatch");
         fw::ParameterSet old{{"trajectory_spacing", 3.0}}, migrated;
         QString migrationError;
         require(plugin->migrateParameters(3, old, migrated, migrationError) &&

@@ -466,7 +466,7 @@ class CorrugatedPanelPlugin final : public QObject, public fw::IAlgorithmPlugin 
     fw::AlgorithmDescriptor descriptor() const override {
         return {"custom.corrugatedPanelFeature",
                 QStringLiteral("波纹板特征提取：竖直放置"),
-                "1.7.0",
+                "1.7.1",
                 {"x", "y", "z"}};
     }
     QJsonObject parameterSchema() const override { return schema(); }

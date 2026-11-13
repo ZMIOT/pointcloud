@@ -74,6 +74,13 @@ int main(int argc, char **argv) {
             require(result.referenceSegments.size() == 2 && result.usedProjectionFallback &&
                         result.projected.size() == 383, "3.txt feature coverage or fallback changed");
             require(result.fittedLine.size() == 18, "3.txt gained a spurious slope segment");
+            require((result.fittedLine.front().xyz-result.trajectory.front().xyz).norm() < 1e-10 &&
+                        (result.fittedLine.back().xyz-result.trajectory.back().xyz).norm() < 1e-10,
+                    "3.txt endpoint was relocated by fitting");
+            for (const auto &corner : result.fittedLine)
+                require(std::any_of(result.trajectory.begin(), result.trajectory.end(),
+                        [&](const bwb::ProjectedPoint &p) { return (p.xyz-corner.xyz).norm() < 1e-10; }),
+                        "3.txt slope transition left the recovered curve");
             for (const auto &p : result.projected) {
                 require(p.projectionFallback && p.referenceIndex < result.referenceSegments.size(),
                         "3.txt mixed curve modes or lost A ownership");
