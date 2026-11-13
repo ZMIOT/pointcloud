@@ -268,11 +268,21 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         const double meanS = std::accumulate(seedSs.begin(), seedSs.end(), 0.0)/seedSs.size();
         const double meanT = std::accumulate(seedTs.begin(), seedTs.end(), 0.0)/seedTs.size();
         double covarianceST = 0, varianceS = 0;
+        const auto seedRange = std::minmax_element(seedSs.begin(), seedSs.end());
         for (std::size_t i = 0; i < seedSs.size(); ++i) {
             covarianceST += (seedSs[i]-meanS)*(seedTs[i]-meanT);
             varianceS += (seedSs[i]-meanS)*(seedSs[i]-meanS);
         }
-        const double lengthSlope = varianceS > 1e-8 ? covarianceST/varianceS : 0;
+        // A window can contain many points from only one scan line. Its tiny
+        // longitudinal jitter cannot identify dT/dS; regressing it amplifies
+        // acquisition noise into an isolated transverse spike at the station.
+        const double seedSpan = *seedRange.second-*seedRange.first;
+        const double seedStd = std::sqrt(varianceS/double(seedSs.size()));
+        const bool lengthSlopeIdentifiable =
+            seedSpan >= halfWidth*0.25 && seedStd >= halfWidth*0.10;
+        station.seedLongitudinalSpan = seedSpan;
+        station.lengthSlopeIdentifiable = lengthSlopeIdentifiable;
+        const double lengthSlope = lengthSlopeIdentifiable ? covarianceST/varianceS : 0;
         for (std::size_t i = 0; i < seedTs.size(); ++i) seedTs[i] -= lengthSlope*seedSs[i];
         const double seedT = median(seedTs), seedH = median(seedHs);
         std::size_t seedRepresentative = 0;

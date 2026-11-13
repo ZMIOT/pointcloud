@@ -101,6 +101,8 @@ struct IntersectionStation {
     bool localPatchExtension = false; // Validated local face direction, not projection.
     double localPatchPredictionSpread = 0.0;
     std::string broadModelFailure; // Preserved even when the local patch succeeds.
+    double seedLongitudinalSpan = 0.0;
+    bool lengthSlopeIdentifiable = false;
     bool hasProjectionCandidate = false;
     bool valid = false;
     std::string failure;

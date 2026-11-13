@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
         require(fw::Parameters::validateSchema(schema).isEmpty(), "invalid parameter schema");
         const auto parameters = fw::Parameters::defaults(schema);
         require(schema.value("parameterVersion").toInt() == 5 &&
-                    plugin->descriptor().version == "1.7.2", "plugin version mismatch");
+                    plugin->descriptor().version == "1.7.3", "plugin version mismatch");
         fw::ParameterSet old{{"trajectory_spacing", 3.0}}, migrated;
         QString migrationError;
         require(plugin->migrateParameters(3, old, migrated, migrationError) &&
@@ -203,13 +203,15 @@ int main(int argc, char **argv) {
 
         // 同一真实样本还需经过插件的 float 点云转换，避免仅验证 double 核心。
         for (const char *sampleVariable : {"BWB_SAMPLE_6_PATH", "BWB_SAMPLE_52_PATH",
-                                           "BWB_SAMPLE_1_PATH", "BWB_SAMPLE_3_PATH"}) {
+                                           "BWB_SAMPLE_1_PATH", "BWB_SAMPLE_3_PATH",
+                                           "BWB_SAMPLE_8_PATH"}) {
             const char *samplePath = std::getenv(sampleVariable);
             if (!samplePath || !*samplePath)
                 continue;
             const bool sample52 = std::string(sampleVariable) == "BWB_SAMPLE_52_PATH";
             const bool sample1 = std::string(sampleVariable) == "BWB_SAMPLE_1_PATH";
             const bool sample3 = std::string(sampleVariable) == "BWB_SAMPLE_3_PATH";
+            const bool sample8 = std::string(sampleVariable) == "BWB_SAMPLE_8_PATH";
             std::ifstream file(std::filesystem::u8path(samplePath));
             require(bool(file), "cannot open sample6 for plugin regression");
             std::string header;
@@ -220,12 +222,15 @@ int main(int argc, char **argv) {
             while (file >> index >> x >> y >> z)
                 realCloud.push_back({float(x), float(y), float(z)});
             require(file.eof() && realCloud.size() ==
-                        (sample1 ? 1448522u : (sample52 ? 831069u : (sample3 ? 1100339u : 1309174u))),
+                        (sample1 ? 1448522u : (sample52 ? 831069u :
+                            (sample3 ? 1100339u : (sample8 ? 593461u : 1309174u)))),
                     "wrong sample6 fixture for plugin regression");
-            const char *sampleName = sample1 ? "1.txt" : (sample52 ? "52.txt" : (sample3 ? "3.txt" : "6.txt"));
+            const char *sampleName = sample1 ? "1.txt" : (sample52 ? "52.txt" :
+                (sample3 ? "3.txt" : (sample8 ? "8.txt" : "6.txt")));
             auto realData = fw::DebugLayer::result(sampleName, realCloud).data;
             realData.id = sample1 ? "sample1-regression" :
-                (sample52 ? "sample52-regression" : (sample3 ? "sample3-regression" : "sample6-regression"));
+                (sample52 ? "sample52-regression" : (sample3 ? "sample3-regression" :
+                    (sample8 ? "sample8-regression" : "sample6-regression")));
             realData.coordinateFrame = "world";
             realData.unit = "mm";
             Context realContext;
@@ -233,6 +238,15 @@ int main(int argc, char **argv) {
             require(realResult.status == fw::ResultStatus::Success,
                     realResult.message.toStdString());
             const auto segments = realResult.metrics.value("reference_segments").toArray();
+            if (sample8) {
+                const auto surface = realResult.metrics.value("surface_intersection").toObject();
+                require(segments.size() == 2 && surface.value("used_projection_fallback").toBool() &&
+                            surface.value("valid_stations").toInt() == 384 &&
+                            surface.value("length_slope_suppressed_stations").toInt() == 8,
+                        "plugin sample8 lost narrow-window spike suppression");
+                std::cout << "8.txt plugin regression: narrow windows suppressed=8\n";
+                continue;
+            }
             if (sample1) {
                 const auto surface = realResult.metrics.value("surface_intersection").toObject();
                 require(segments.size() == 1 && !surface.value("used_projection_fallback").toBool() &&

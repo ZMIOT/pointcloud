@@ -179,7 +179,7 @@ int main(int argc, char **argv) {
         writePoints(directory / "c_intersection.xyz", result.projected);
         writePoints(directory / "c_feature_curve.xyz", result.projected);
         std::ofstream stations(directory / "intersection_stations.tsv");
-        stations << "longitudinal\tvalid\treference_index\tsupport\tdegree\trms\textrapolation\tboundary_intersection_gap\tis_projection_fallback\tintersection_failure\tfinal_failure\tsupport_min_height\tsupport_max_height\tattempted_extrapolation\tlocal_patch_extension\tlocal_patch_prediction_spread\tbroad_model_failure\tx\ty\tz\tdx_dh\tdy_dh\tdz_dh\n";
+        stations << "longitudinal\tvalid\treference_index\tsupport\tdegree\trms\textrapolation\tboundary_intersection_gap\tis_projection_fallback\tintersection_failure\tfinal_failure\tsupport_min_height\tsupport_max_height\tattempted_extrapolation\tlocal_patch_extension\tlocal_patch_prediction_spread\tbroad_model_failure\tseed_longitudinal_span\tlength_slope_identifiable\tx\ty\tz\tdx_dh\tdy_dh\tdz_dh\n";
         for (const auto &s : result.intersectionStations)
             stations << s.longitudinal << '\t' << s.valid << '\t' << s.point.referenceIndex
                      << '\t' << s.point.supportCount << '\t' << s.point.surfaceDegree << '\t'
@@ -189,6 +189,7 @@ int main(int argc, char **argv) {
                      << s.supportMinHeight << '\t' << s.supportMaxHeight << '\t'
                      << s.attemptedExtrapolation << '\t' << s.localPatchExtension << '\t'
                      << s.localPatchPredictionSpread << '\t' << s.broadModelFailure << '\t'
+                     << s.seedLongitudinalSpan << '\t' << s.lengthSlopeIdentifiable << '\t'
                      << std::setprecision(12) << s.point.xyz.x() << '\t' << s.point.xyz.y() << '\t'
                      << s.point.xyz.z() << '\t' << s.surfaceHeightDirection.x() << '\t'
                      << s.surfaceHeightDirection.y() << '\t' << s.surfaceHeightDirection.z() << '\n';

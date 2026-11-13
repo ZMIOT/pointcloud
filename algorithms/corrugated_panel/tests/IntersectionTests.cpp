@@ -144,6 +144,51 @@ void thinFaceExtension(const Eigen::Matrix3d &r, const bwb::Vec3 &translation, i
     }
     std::cout << "thin oblique face extension passed\n";
 }
+
+void singleScanLineWindowDoesNotSpike() {
+    Fixture f;
+    f.result.referenceLongitudinal = bwb::Vec3::UnitX();
+    f.result.referenceTransverse = bwb::Vec3::UnitY();
+    f.result.referenceOrigin = bwb::Vec3::Zero();
+    bwb::ReferenceSegment a;
+    a.plane.normal = bwb::Vec3::UnitZ();
+    a.longitudinalMin = -60;
+    a.longitudinalMax = 60;
+    f.result.referenceSegments.push_back(a);
+    f.result.slices.resize(1);
+    f.result.slices[0].side = 1;
+    f.result.selectedSlice = 0;
+    for (int line=0; line<=36; ++line) {
+        const double center=-59.4+line*3.3;
+        for (int ih=0; ih<=92; ++ih) {
+            const double h=8.5+ih*0.25;
+            const double jitter=0.025*std::sin(ih*1.7+line);
+            const double x=center+jitter;
+            // Intra-line acquisition pattern: harmless for the face location,
+            // but a regression on this one scan line would infer dY/dX=12.
+            const double y=0.1*center+0.4*h+12.0*jitter;
+            const auto source=std::uint32_t(f.points.size());
+            f.points.push_back({{x,y,h},source});
+            if (std::abs(h-20.0)<=1.5) f.result.selectedIndices.push_back(int(source));
+        }
+    }
+    auto config=bwb::Config{};
+    config.maxSurfaceExtrapolation=0;
+    require(bwb::recoverSurfaceIntersection(f.points,config,{},f.result),f.result.message);
+    require(f.result.usedProjectionFallback,"fixture must exercise projection candidates");
+    int suppressed=0;
+    double maximumStep=0;
+    for (std::size_t i=0; i<f.result.intersectionStations.size(); ++i) {
+        const auto &station=f.result.intersectionStations[i];
+        suppressed += station.lengthSlopeIdentifiable ? 0 : 1;
+        if (i) maximumStep=std::max(maximumStep,
+            (station.point.xyz-f.result.intersectionStations[i-1].point.xyz).norm());
+    }
+    require(suppressed>5,"fixture did not create narrow single-scan-line windows");
+    require(maximumStep<5.0,"unidentifiable length regression created an isolated spike");
+    std::cout << "single scan-line window suppression passed: stations="
+              << suppressed << " max_step=" << maximumStep << '\n';
+}
 }
 int main() {
     try {
@@ -163,6 +208,7 @@ int main() {
         thinFaceExtension(identity,zero,-1);
         thinFaceExtension(Eigen::AngleAxisd(1.1,bwb::Vec3(1,2,-3).normalized())
                               .toRotationMatrix(), {100000,-250000,50000});
+        singleScanLineWindowDoesNotSpike();
         rejected(thinPatch(0.03), "surface_extrapolation_limit");
         rejected(thinPatch(0,10.75), "insufficient_height_span");
         auto distant = fixture(0.4,0);

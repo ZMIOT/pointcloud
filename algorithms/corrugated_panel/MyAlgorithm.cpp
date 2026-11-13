@@ -132,13 +132,18 @@ QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
     int validStations = 0, intersectionValidStations = 0, quadraticStations = 0;
     int projectionFallbackStations = 0, attemptedFailures = 0;
     int localPatchStations = 0;
+    int suppressedLengthSlopeStations = 0;
     double maxPatchSpread = 0;
+    double minSeedLongitudinalSpan = std::numeric_limits<double>::infinity();
     double maxRms = 0, maxExtrapolation = 0, maxBoundaryGap = 0;
     for (const auto &station : result.intersectionStations) {
         if (station.localPatchExtension) {
             ++localPatchStations;
             maxPatchSpread = std::max(maxPatchSpread, station.localPatchPredictionSpread);
         }
+        suppressedLengthSlopeStations += station.lengthSlopeIdentifiable ? 0 : 1;
+        minSeedLongitudinalSpan = std::min(minSeedLongitudinalSpan,
+                                           station.seedLongitudinalSpan);
         maxBoundaryGap = std::max(maxBoundaryGap, station.boundaryIntersectionGap);
         if (station.valid) {
             ++validStations;
@@ -232,6 +237,9 @@ QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
                 {"quadratic_stations", quadraticStations},
                 {"local_patch_validated_stations", localPatchStations},
                 {"max_local_patch_prediction_spread", maxPatchSpread},
+                {"length_slope_suppressed_stations", suppressedLengthSlopeStations},
+                {"min_seed_longitudinal_span", std::isfinite(minSeedLongitudinalSpan)
+                    ? minSeedLongitudinalSpan : 0.0},
                 {"max_valid_intersection_rms", maxRms},
                 {"max_valid_intersection_extrapolation", maxExtrapolation},
                 {"max_boundary_intersection_gap", maxBoundaryGap},
@@ -474,7 +482,7 @@ class CorrugatedPanelPlugin final : public QObject, public fw::IAlgorithmPlugin 
     fw::AlgorithmDescriptor descriptor() const override {
         return {"custom.corrugatedPanelFeature",
                 QStringLiteral("波纹板特征提取：竖直放置"),
-                "1.7.2",
+                "1.7.3",
                 {"x", "y", "z"}};
     }
     QJsonObject parameterSchema() const override { return schema(); }

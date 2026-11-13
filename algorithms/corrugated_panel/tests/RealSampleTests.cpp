@@ -23,9 +23,11 @@ int main(int argc, char **argv) {
     const bool sample121 = argc > 1 && std::string(argv[1]) == "121";
     const bool sample1 = argc > 1 && std::string(argv[1]) == "1";
     const bool sample3 = argc > 1 && std::string(argv[1]) == "3";
+    const bool sample8 = argc > 1 && std::string(argv[1]) == "8";
     const char *variable = sample121 ? "BWB_SAMPLE_121_PATH" :
         (sample52 ? "BWB_SAMPLE_52_PATH" :
-            (sample1 ? "BWB_SAMPLE_1_PATH" : (sample3 ? "BWB_SAMPLE_3_PATH" : "BWB_SAMPLE_6_PATH")));
+            (sample1 ? "BWB_SAMPLE_1_PATH" : (sample3 ? "BWB_SAMPLE_3_PATH" :
+                (sample8 ? "BWB_SAMPLE_8_PATH" : "BWB_SAMPLE_6_PATH"))));
     const char *path = std::getenv(variable);
     if (!path || !*path) {
         std::cout << "SKIP: set " << variable << " to the original sample\n";
@@ -42,7 +44,8 @@ int main(int argc, char **argv) {
         while (input >> index >> x >> y >> z)
             points.push_back({bwb::Vec3(x, y, z), std::uint32_t(points.size())});
         require(input.eof() && points.size() == (sample121 ? 4238245u :
-                    (sample1 ? 1448522u : (sample52 ? 831069u : (sample3 ? 1100339u : 1309174u)))),
+                    (sample1 ? 1448522u : (sample52 ? 831069u :
+                        (sample3 ? 1100339u : (sample8 ? 593461u : 1309174u))))),
                 "unexpected real-sample point count");
         bwb::Config config;
         if (sample52) config.allowProjectionFallback = false;
@@ -97,6 +100,27 @@ int main(int argc, char **argv) {
                         [](const bwb::IntersectionStation &s) { return s.localPatchExtension; }) == 1,
                     "3.txt must retain local patch recovery evidence");
             std::cout << "3.txt body-face extension passed: 383 stations, 18 fitted corners\n";
+            return 0;
+        }
+        if (sample8) {
+            require(result.referenceSegments.size() == 2 && result.usedProjectionFallback &&
+                        result.projected.size() == 384,
+                    "8.txt feature coverage or fallback changed");
+            require(result.fittedLine.size() == 18,
+                    "8.txt narrow scan-line windows created spurious slope segments");
+            const auto suppressed = std::count_if(
+                result.intersectionStations.begin(), result.intersectionStations.end(),
+                [](const bwb::IntersectionStation &s) { return !s.lengthSlopeIdentifiable; });
+            require(suppressed == 8,
+                    "8.txt did not preserve the known narrow scan-line evidence");
+            double maximumStep = 0;
+            for (std::size_t i=1; i<result.projected.size(); ++i)
+                maximumStep = std::max(maximumStep,
+                    (result.projected[i].xyz-result.projected[i-1].xyz).norm());
+            require(maximumStep < 5.0,
+                    "8.txt projection candidates contain an isolated jump");
+            std::cout << "8.txt narrow-window regression passed: suppressed=" << suppressed
+                      << " max_step=" << maximumStep << '\n';
             return 0;
         }
         if (sample1) {
