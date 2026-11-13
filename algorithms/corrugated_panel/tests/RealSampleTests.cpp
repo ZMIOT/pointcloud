@@ -19,12 +19,13 @@ void require(bool condition, const char *message) {
 // 可选真实数据回归，不将用户的 54 MB 点云复制进源码。
 // 这些阈值防止已观测到的局部错面回退，不是带人工标注的精度验收。
 int main(int argc, char **argv) {
+    const bool sample118 = argc > 1 && std::string(argv[1]) == "118";
     const bool sample52 = argc > 1 && std::string(argv[1]) == "52";
     const bool sample121 = argc > 1 && std::string(argv[1]) == "121";
     const bool sample1 = argc > 1 && std::string(argv[1]) == "1";
     const bool sample3 = argc > 1 && std::string(argv[1]) == "3";
     const bool sample8 = argc > 1 && std::string(argv[1]) == "8";
-    const char *variable = sample121 ? "BWB_SAMPLE_121_PATH" :
+    const char *variable = sample118 ? "BWB_SAMPLE_118_PATH" : sample121 ? "BWB_SAMPLE_121_PATH" :
         (sample52 ? "BWB_SAMPLE_52_PATH" :
             (sample1 ? "BWB_SAMPLE_1_PATH" : (sample3 ? "BWB_SAMPLE_3_PATH" :
                 (sample8 ? "BWB_SAMPLE_8_PATH" : "BWB_SAMPLE_6_PATH"))));
@@ -43,13 +44,40 @@ int main(int argc, char **argv) {
         double x = 0, y = 0, z = 0;
         while (input >> index >> x >> y >> z)
             points.push_back({bwb::Vec3(x, y, z), std::uint32_t(points.size())});
-        require(input.eof() && points.size() == (sample121 ? 4238245u :
+        require(input.eof() && points.size() == (sample118 ? 5779410u : sample121 ? 4238245u :
                     (sample1 ? 1448522u : (sample52 ? 831069u :
                         (sample3 ? 1100339u : (sample8 ? 593461u : 1309174u))))),
                 "unexpected real-sample point count");
         bwb::Config config;
         if (sample52) config.allowProjectionFallback = false;
         const auto result = bwb::extract(points, config);
+        if (sample118) {
+            require(result.ok && result.prefilterApplied && !result.usedProjectionFallback,
+                    "118 prefilter failed to recover the off-edge body curve");
+            require(result.referenceSegments.size()==6 && result.referenceIndices.size()==1351011 &&
+                        result.retainedIndices.size()+result.rejectedIndices.size()==points.size(),
+                    "118 reference evidence or filter partition changed");
+            require(result.rejectedIndices.size()>100000 && result.retainedIndices.size()>points.size()*0.75,
+                    "118 filter removed no interference or erased most of the panel");
+            for (int i:result.referenceIndices) require(result.surfaceMask[std::size_t(i)],"118 A surface was removed");
+            for (const auto &slice:result.slices) for (int i:slice.raw)
+                require(result.surfaceMask[std::size_t(i)],"118 removed point entered slice");
+            require(result.projected.size()==1259 && result.fittedLine.size()==38 &&
+                        result.intersectionStations.size()==result.projected.size(),
+                    "118 curve lost length coverage or folds");
+            for (const auto &station:result.intersectionStations)
+                require(station.valid && station.failure.empty() && station.intersectionFailure.empty() &&
+                            result.surfaceMask[station.point.source],"118 unsupported station or rejected provenance");
+            const auto &selected=result.slices[std::size_t(result.selectedSlice)];
+            require(selected.bent && selected.completeness>0.95 && selected.length>2450,
+                    "118 corrugated side is incomplete");
+            require(std::any_of(result.slices.begin(),result.slices.end(),[&](const bwb::SliceEvaluation &s) {
+                return s.side!=selected.side && !s.bent && s.completeness>0.95 && s.length>2450;
+            }),"118 straight platform side remains confused with corrugation");
+            std::cout << "118 prefilter regression passed: retained=" << result.retainedIndices.size()
+                      << " removed=" << result.rejectedIndices.size() << " stations=" << result.projected.size() << '\n';
+            return 0;
+        }
         require(result.bodyBandMin == 8.5 && result.bodyBandMax == 31.5,
                 "sample must use the off-edge body support band");
         for (const auto &station : result.intersectionStations)
@@ -208,8 +236,24 @@ int main(int argc, char **argv) {
             require(oppositeStraight, "52.txt has no supported opposite straight side");
             require(result.projected.size() == 385 &&
                         std::count_if(result.intersectionStations.begin(),result.intersectionStations.end(),
-                            [](const bwb::IntersectionStation &s) { return s.localPatchExtension; }) == 63,
+                            [](const bwb::IntersectionStation &s) { return s.localPatchExtension; }) > 0,
                     "52.txt lost validated local face extensions");
+            // Prefiltering can let a previously rejected broad model pass, so local
+            // fallback counts need not remain 63. Keep that baseline regression AND
+            // constrain geometry, coverage and curve mode with filtering enabled.
+            auto baselineConfig=config;baselineConfig.prefilterEnabled=false;
+            const auto baseline=bwb::extract(points,baselineConfig);
+            require(baseline.ok && !baseline.usedProjectionFallback &&
+                        baseline.projected.size()==result.projected.size() &&
+                        std::count_if(baseline.intersectionStations.begin(),baseline.intersectionStations.end(),
+                            [](const bwb::IntersectionStation &s) { return s.localPatchExtension; })==63,
+                    "52.txt unfiltered baseline changed");
+            double maxFilterShift=0;
+            for (std::size_t i=0;i<baseline.projected.size();++i)
+                maxFilterShift=std::max(maxFilterShift,(baseline.projected[i].xyz-result.projected[i].xyz).norm());
+            require(maxFilterShift<0.1 && baseline.fittedLine.size()==result.fittedLine.size(),
+                    "52.txt prefilter moved the curve or lost fold coverage");
+            std::cout << "52 prefilter max_curve_shift=" << maxFilterShift << '\n';
             for (const auto &s : result.intersectionStations) {
                 require(s.valid && s.failure.empty() && s.intersectionFailure.empty() &&
                             s.localPatchPredictionSpread <= config.surfaceFitTolerance,

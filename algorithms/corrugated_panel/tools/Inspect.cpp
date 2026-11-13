@@ -64,9 +64,9 @@ void writeIndexed(const std::filesystem::path &path, const std::vector<bwb::Poin
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc < 2 || argc > 5) {
+    if (argc < 2 || argc > 6) {
         std::cerr << "用法: CorrugatedPanelInspect <index-x-y-z.txt> [输出目录] "
-                     "[坡段拟合容差] [局部基准面最大长度]\n";
+                     "[坡段拟合容差] [局部基准面最大长度] [前置滤波0/1]\n";
         return 2;
     }
     std::vector<bwb::Point> points;
@@ -106,10 +106,20 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    if (argc >= 6) {
+        const std::string flag=argv[5];
+        if (flag!="0" && flag!="1") { std::cerr << "前置滤波须为0或1\n";return 2; }
+        config.prefilterEnabled=flag=="1";
+    }
     const auto result = bwb::extract(points, config, hooks);
     std::cout << "input_points=" << points.size() << '\n'
               << "ok=" << (result.ok ? "true" : "false") << '\n'
               << "message=" << result.message << '\n'
+              << "prefilter_enabled=" << result.prefilterApplied << '\n'
+              << "prefilter_retained=" << result.retainedIndices.size() << '\n'
+              << "prefilter_rejected=" << result.rejectedIndices.size() << '\n'
+              << "prefilter_patches=" << result.prefilterPatches << '\n'
+              << "prefilter_unsupported_windows=" << result.prefilterUnsupportedWindows << '\n'
               << "plane=" << result.reference.normal.x() << ' '
               << result.reference.normal.y() << ' ' << result.reference.normal.z() << ' '
               << result.reference.d << '\n'
@@ -183,6 +193,8 @@ int main(int argc, char **argv) {
     if (argc >= 3 && std::string(argv[2]) != "-") {
         const auto directory = std::filesystem::u8path(argv[2]);
         std::filesystem::create_directories(directory);
+        writeIndexed(directory / "surface_kept.xyz", points, result.retainedIndices);
+        writeIndexed(directory / "surface_removed.xyz", points, result.rejectedIndices);
         writeIndexed(directory / "a_plane.xyz", points, result.referenceIndices);
         writeIndexed(directory / "b_slice.xyz", points, result.selectedIndices);
         writePoints(directory / "c_projected.xyz", result.projected);

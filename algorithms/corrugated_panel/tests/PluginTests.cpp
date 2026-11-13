@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -70,8 +71,8 @@ int main(int argc, char **argv) {
         const auto schema = plugin->parameterSchema();
         require(fw::Parameters::validateSchema(schema).isEmpty(), "invalid parameter schema");
         const auto parameters = fw::Parameters::defaults(schema);
-        require(schema.value("parameterVersion").toInt() == 5 &&
-                    plugin->descriptor().version == "1.7.4", "plugin version mismatch");
+        require(schema.value("parameterVersion").toInt() == 6 &&
+                    plugin->descriptor().version == "1.8.0", "plugin version mismatch");
         fw::ParameterSet old{{"trajectory_spacing", 3.0}}, migrated;
         QString migrationError;
         require(plugin->migrateParameters(3, old, migrated, migrationError) &&
@@ -85,6 +86,10 @@ int main(int argc, char **argv) {
                 "explicit user extension limit must survive migration");
         require(!plugin->migrateParameters(99, old, migrated, migrationError),
                 "unknown parameter version must not migrate");
+        require(plugin->migrateParameters(5,old,migrated,migrationError) &&
+                    migrated.value("prefilter_enabled").toBool() &&
+                    migrated.value("prefilter_distance").toDouble()==0.8,
+                "v5 must migrate to the enabled prefilter");
         require(fw::Parameters::validate(schema, parameters).isEmpty(),
                 "default parameters are invalid");
 
@@ -92,6 +97,15 @@ int main(int argc, char **argv) {
         data.id = "synthetic";
         data.coordinateFrame = "test-world";
         data.unit = "mm";
+        // Preserve a custom original field through the filter, not only XYZ.
+        pcl::PCLPointField tag;
+        tag.name="sample_tag";tag.offset=12;tag.datatype=pcl::PCLPointField::UINT32;tag.count=1;
+        require(data.cloud->point_step>=16,"synthetic XYZ fixture lacks padding for tag");
+        pcl::PCLPointCloud2::Ptr tagged(new pcl::PCLPointCloud2(*data.cloud));
+        tagged->fields.push_back(tag);
+        for (std::uint32_t i=0;i<tagged->width;++i)
+            std::memcpy(tagged->data.data()+i*tagged->point_step+12,&i,4);
+        data.cloud=tagged;
         fw::AlgorithmInput input{{data}, {}};
         fw::IAlgorithm *algorithm = plugin->create();
         struct Guard {
@@ -120,8 +134,27 @@ int main(int argc, char **argv) {
                     referenceSegments.at(0).toObject().value("local_y").toArray().size() == 3 &&
                     referenceSegments.at(0).toObject().value("local_z").toArray().size() == 3,
                 "local reference frames are missing from metrics");
-        require(result.outputs.size() == 6,
-                "A/B/C/measured-curve/fitted-line/white-point outputs are required");
+        require(result.outputs.size() == 8,
+                "six legacy outputs and kept/removed prefilter clouds are required");
+        require(result.outputs[6].name==QStringLiteral("滤波保留板面") &&
+                    result.outputs[7].name==QStringLiteral("滤波剔除点（待复核）"),"filter outputs missing");
+        require(result.outputs[6].cloud->width+result.outputs[7].cloud->width==data.cloud->width &&
+                    result.metrics.value("surface_prefilter").toObject().value("enabled").toBool(),
+                "filter partition or metrics missing");
+        std::vector<unsigned char> seen(data.cloud->width,0);
+        for (int outputIndex : {6,7}) {
+            const auto &cloud=*result.outputs[outputIndex].cloud;
+            require(fw::hasFields(result.outputs[outputIndex],{"sample_tag"}) &&
+                        cloud.point_step==data.cloud->point_step,"filter lost original fields");
+            for (std::uint32_t i=0;i<cloud.width;++i) {
+                const auto *record=cloud.data.data()+i*cloud.point_step;
+                std::uint32_t source=0;std::memcpy(&source,record+12,4);
+                require(source<seen.size() && !seen[source],"filter duplicated or invented an input point");
+                require(std::memcmp(record,data.cloud->data.data()+source*data.cloud->point_step,cloud.point_step)==0,
+                        "filter changed original point coordinates or fields");
+                seen[source]=1;
+            }
+        }
         require(result.outputs[0].name == QStringLiteral("A 基准面"), "A output missing");
         require(result.outputs[1].name == QStringLiteral("B 最佳切片"), "B output missing");
         require(result.outputs[2].name == QStringLiteral("C 特征曲线候选点"), "C output missing");
@@ -190,10 +223,12 @@ int main(int argc, char **argv) {
         noExtrapolation["allow_projection_fallback"] = false;
         Context failureContext;
         const auto unsupported = algorithm->execute(input, noExtrapolation, failureContext);
-        require(unsupported.status == fw::ResultStatus::Failed && unsupported.outputs.empty() &&
+        require(unsupported.status == fw::ResultStatus::Failed && unsupported.outputs.size()==2 &&
+                    unsupported.outputs[0].id.endsWith("_surface_kept") &&
+                    unsupported.outputs[1].id.endsWith("_surface_removed") &&
                     unsupported.metrics.value("surface_intersection").toObject()
                         .value("failure_counts").toObject().contains("surface_extrapolation_limit"),
-                "unsupported recovery must expose failure evidence without formal trajectory outputs");
+                "unsupported recovery must expose filter evidence without formal trajectory outputs");
         auto fallbackParameters = parameters;
         fallbackParameters["max_surface_extrapolation"] = 0.0;
         Context fallbackContext;
@@ -206,7 +241,7 @@ int main(int argc, char **argv) {
         // 同一真实样本还需经过插件的 float 点云转换，避免仅验证 double 核心。
         for (const char *sampleVariable : {"BWB_SAMPLE_6_PATH", "BWB_SAMPLE_52_PATH",
                                            "BWB_SAMPLE_1_PATH", "BWB_SAMPLE_3_PATH",
-                                           "BWB_SAMPLE_8_PATH"}) {
+                                           "BWB_SAMPLE_8_PATH", "BWB_SAMPLE_118_PATH"}) {
             const char *samplePath = std::getenv(sampleVariable);
             if (!samplePath || !*samplePath)
                 continue;
@@ -214,6 +249,7 @@ int main(int argc, char **argv) {
             const bool sample1 = std::string(sampleVariable) == "BWB_SAMPLE_1_PATH";
             const bool sample3 = std::string(sampleVariable) == "BWB_SAMPLE_3_PATH";
             const bool sample8 = std::string(sampleVariable) == "BWB_SAMPLE_8_PATH";
+            const bool sample118 = std::string(sampleVariable) == "BWB_SAMPLE_118_PATH";
             std::ifstream file(std::filesystem::u8path(samplePath));
             require(bool(file), "cannot open sample6 for plugin regression");
             std::string header;
@@ -224,10 +260,10 @@ int main(int argc, char **argv) {
             while (file >> index >> x >> y >> z)
                 realCloud.push_back({float(x), float(y), float(z)});
             require(file.eof() && realCloud.size() ==
-                        (sample1 ? 1448522u : (sample52 ? 831069u :
+                        (sample118 ? 5779410u : sample1 ? 1448522u : (sample52 ? 831069u :
                             (sample3 ? 1100339u : (sample8 ? 593461u : 1309174u)))),
                     "wrong sample6 fixture for plugin regression");
-            const char *sampleName = sample1 ? "1.txt" : (sample52 ? "52.txt" :
+            const char *sampleName = sample118 ? "118.txt" : sample1 ? "1.txt" : (sample52 ? "52.txt" :
                 (sample3 ? "3.txt" : (sample8 ? "8.txt" : "6.txt")));
             auto realData = fw::DebugLayer::result(sampleName, realCloud).data;
             realData.id = sample1 ? "sample1-regression" :
@@ -240,6 +276,20 @@ int main(int argc, char **argv) {
             require(realResult.status == fw::ResultStatus::Success,
                     realResult.message.toStdString());
             const auto segments = realResult.metrics.value("reference_segments").toArray();
+            if (sample118) {
+                const auto surface=realResult.metrics.value("surface_intersection").toObject();
+                require(segments.size()==6 && !surface.value("used_projection_fallback").toBool() &&
+                            surface.value("valid_stations").toInt()==1259 &&
+                            surface.value("failure_counts").toObject().isEmpty() &&
+                            realResult.outputs[4].cloud->width==38,
+                        "plugin 118 lost continuous body intersections or folds");
+                const auto filter=realResult.metrics.value("surface_prefilter").toObject();
+                require(filter.value("rejected_points").toDouble()>100000 &&
+                            realResult.outputs[6].cloud->width+realResult.outputs[7].cloud->width==5779410,
+                        "plugin 118 filter partition is incomplete");
+                std::cout << "118.txt plugin prefilter: removed=" << filter.value("rejected_points").toDouble() << '\n';
+                continue;
+            }
             if (sample8) {
                 const auto surface = realResult.metrics.value("surface_intersection").toObject();
                 require(segments.size() == 2 && surface.value("used_projection_fallback").toBool() &&
@@ -263,8 +313,23 @@ int main(int argc, char **argv) {
                 const auto surface = realResult.metrics.value("surface_intersection").toObject();
                 require(!surface.value("used_projection_fallback").toBool() &&
                             surface.value("intersection_valid_stations").toInt() == (sample52 ? 385 : 383) &&
-                            surface.value("local_patch_validated_stations").toInt() == (sample52 ? 63 : 1),
+                            (sample52 ? surface.value("local_patch_validated_stations").toInt()>0 :
+                                surface.value("local_patch_validated_stations").toInt()==1),
                         "float path lost stable local-face extension or reverted to projection");
+                if (sample52) {
+                    auto baselineParameters=parameters;baselineParameters["prefilter_enabled"]=false;
+                    const auto baseline=algorithm->execute({{realData},{}},baselineParameters,realContext);
+                    require(baseline.status==fw::ResultStatus::Success &&
+                                baseline.metrics.value("surface_intersection").toObject()
+                                    .value("local_patch_validated_stations").toInt()==63,
+                            "float path unfiltered 52 baseline changed");
+                    const auto before=fw::toCloud<pcl::PointXYZ>(baseline.outputs[2]);
+                    const auto after=fw::toCloud<pcl::PointXYZ>(realResult.outputs[2]);
+                    require(before->size()==after->size(),"float prefilter lost station coverage");
+                    for (std::size_t i=0;i<before->size();++i)
+                        require((before->points[i].getVector3fMap()-after->points[i].getVector3fMap()).norm()<0.1f,
+                                "float prefilter displaced the validated 52 curve");
+                }
             }
             for (const auto &entry : segments) {
                 const auto segment = entry.toObject();
@@ -287,8 +352,8 @@ int main(int argc, char **argv) {
         Context debug;
         debug.debugging = true;
         const auto stepped = algorithm->execute(input, parameters, debug);
-        require(stepped.status == fw::ResultStatus::Success && debug.checkpoints == 5,
-                "five debug stages are required");
+        require(stepped.status == fw::ResultStatus::Success && debug.checkpoints == 6,
+                "six debug stages including the prefilter are required");
         for (int i = 0; i < result.outputs.size(); ++i)
             require(result.outputs[i].cloud->data == stepped.outputs[i].cloud->data,
                     "debugging changed output data");

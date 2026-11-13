@@ -24,6 +24,10 @@ QJsonObject schema() {
 
 bwb::Config configuration(const fw::ParameterSet &parameters) {
     bwb::Config config;
+    config.prefilterEnabled = parameters["prefilter_enabled"].toBool(true);
+    config.prefilterWindow = parameters["prefilter_window"].toDouble(12.0);
+    config.prefilterDistance = parameters["prefilter_distance"].toDouble(0.8);
+    config.prefilterMinSupport = parameters["prefilter_min_support"].toInt(12);
     config.sliceOffsets = {parameters["offset_1"].toDouble(10.0),
                            parameters["offset_2"].toDouble(20.0),
                            parameters["offset_3"].toDouble(30.0)};
@@ -235,6 +239,14 @@ QJsonObject resultMetrics(const bwb::Result &result, qint64 elapsedMs) {
             {"origin", QJsonArray{line.origin.x(),line.origin.y(),line.origin.z()}},
             {"direction", QJsonArray{line.direction.x(),line.direction.y(),line.direction.z()}}});
     return {{"algorithm_elapsed_ms", double(elapsedMs)},
+            {"surface_prefilter", QJsonObject{
+                {"enabled", result.prefilterApplied},
+                {"method", "overlapping_finite_local_sheet_support"},
+                {"retained_points", double(result.retainedIndices.size())},
+                {"rejected_points", double(result.rejectedIndices.size())},
+                {"patch_count", double(result.prefilterPatches)},
+                {"unsupported_windows", double(result.prefilterUnsupportedWindows)},
+                {"coordinates_modified", false}}},
             {"line_fits", lineFits}, {"max_line_junction_gap", maxLineJunctionGap},
             {"surface_intersection", QJsonObject{
                 {"method", result.usedProjectionFallback
@@ -380,14 +392,26 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
                                             QStringLiteral("双侧切片评估"),
                                             QStringLiteral("选择候选点云 B"),
                                             QStringLiteral("构建特征曲线 C（求交优先、整线投影回退）"),
-                                            QStringLiteral("直线拟合与白点投影")};
+                                            QStringLiteral("直线拟合与白点投影"),
+                                            QStringLiteral("轨迹前滤波：保留板面 / 剔除干扰")};
                 frame.stepId = QStringLiteral("corrugated_%1").arg(stageIndex);
                 frame.title = titles[stageIndex];
-                if (stageIndex == 3) frame.metrics = resultMetrics(partial, 0);
+                if (stageIndex == 3 || stageIndex == 5) frame.metrics = resultMetrics(partial, 0);
                 auto background = fw::DebugLayer::background(QStringLiteral("原始点云"),
                                                               sourceCloud);
                 background.style.opacity = 0.25;
                 frame.layers.push_back(background);
+                if (stageIndex == 5) {
+                    background.style.visible = false;
+                    frame.layers[0] = background;
+                    const auto kept = indexedCloud(sourceCloud, points, partial.retainedIndices,
+                        "_debug_surface_kept", QStringLiteral("滤波保留板面"));
+                    const auto removed = indexedCloud(sourceCloud, points, partial.rejectedIndices,
+                        "_debug_surface_removed", QStringLiteral("滤波剔除点（待复核）"));
+                    frame.layers.push_back(styled(kept.name, kept, {0.2,0.85,0.65},2));
+                    frame.layers.push_back(styled(removed.name, removed, {1.0,0.2,0.25},3));
+                    return context.debug().checkpoint(frame) != fw::DebugAction::Stop;
+                }
                 if (!partial.referenceSegments.empty()) {
                     addReferenceLayers(frame.layers, sourceCloud, points,
                                        partial.referenceSegments,
@@ -432,10 +456,19 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
         const qint64 elapsed = timer.elapsed();
         if (extracted.cancelled)
             return fw::AlgorithmResult::cancelled();
+        const auto kept = indexedCloud(sourceCloud, points, extracted.retainedIndices,
+            "_surface_kept", QStringLiteral("滤波保留板面"));
+        const auto removed = indexedCloud(sourceCloud, points, extracted.rejectedIndices,
+            "_surface_removed", QStringLiteral("滤波剔除点（待复核）"));
         if (!extracted.ok) {
             auto failure = fw::AlgorithmResult::failed(
                 QString::fromStdString(extracted.message));
             failure.metrics = resultMetrics(extracted, elapsed);
+            if (!extracted.surfaceMask.empty()) {
+                failure.outputs = {kept, removed};
+                failure.layers = {styled(kept.name,kept,{0.2,0.85,0.65},2),
+                                  styled(removed.name,removed,{1.0,0.2,0.25},3)};
+            }
             return failure;
         }
 
@@ -453,7 +486,8 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
         auto whitePoints = generatedCloud(sourceCloud, extracted.whitePoints, "_white_points",
                                           QStringLiteral("白色均匀点"));
         fw::AlgorithmResult output;
-        output.outputs = {plane, selected, projected, measuredCurve, fittedLine, whitePoints};
+        output.outputs = {plane, selected, projected, measuredCurve, fittedLine, whitePoints,
+                          kept, removed};
         output.message = extracted.usedProjectionFallback
             ? QStringLiteral("表面求交未覆盖全部站位，已将整条 B 特征曲线投影到对应 A 面；输出明确标记为投影回退，不代表 S 与 A 的交线。")
             : QStringLiteral("已使用远离边缘的板材主体拟合并延伸到基准面；边缘区域未参与特征曲线拟合。白点由该曲线规则化生成。");
@@ -467,6 +501,12 @@ class CorrugatedPanelAlgorithm final : public fw::IAlgorithm {
         auto cLayer = styled(projected.name, projected, {0.2, 0.7, 1.0}, 3, 0.55);
         cLayer.style.visible = false;
         output.layers = {background, aLayer, bLayer, cLayer};
+        auto keptLayer = styled(kept.name,kept,{0.2,0.85,0.65},2,0.45);
+        auto removedLayer = styled(removed.name,removed,{1.0,0.2,0.25},3);
+        keptLayer.style.visible = false;
+        removedLayer.style.visible = false;
+        output.layers.push_back(keptLayer);
+        output.layers.push_back(removedLayer);
         if (extracted.referenceSegments.size() > 1)
             addReferenceLayers(output.layers, sourceCloud, points,
                                extracted.referenceSegments, QStringLiteral("_a_segment"));
@@ -499,14 +539,14 @@ class CorrugatedPanelPlugin final : public QObject, public fw::IAlgorithmPlugin 
     fw::AlgorithmDescriptor descriptor() const override {
         return {"custom.corrugatedPanelFeature",
                 QStringLiteral("波纹板特征提取：竖直放置"),
-                "1.7.4",
+                "1.8.0",
                 {"x", "y", "z"}};
     }
     QJsonObject parameterSchema() const override { return schema(); }
     bool migrateParameters(int fromVersion, const fw::ParameterSet &old,
                            fw::ParameterSet &updated, QString &error) const override {
-        if (fromVersion < 1 || fromVersion > 4) {
-            error = QStringLiteral("只支持从参数版本 1、2、3 或 4 迁移。");
+        if (fromVersion < 1 || fromVersion > 5) {
+            error = QStringLiteral("只支持从参数版本 1 至 5 迁移。");
             return false;
         }
         updated = fw::Parameters::merge(schema(), old);

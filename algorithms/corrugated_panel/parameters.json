@@ -1,9 +1,19 @@
 {
   "schemaVersion": 1,
-  "parameterVersion": 5,
+  "parameterVersion": 6,
   "algorithmId": "custom.corrugatedPanelFeature",
   "title": "波纹板竖直放置特征提取",
   "groups": [
+    {
+      "id": "surface_prefilter",
+      "title": "轨迹提取前：板面支持滤波（输入单位，默认 mm）",
+      "parameters": [
+        {"id":"prefilter_enabled","type":"bool","label":"启用前置板面滤波","default":true,"description":"基准面定位后、切片与表面求交前筛选有限局部面片。保留原坐标与字段，提供保留/剔除图层。局部平面支持是几何证据，不能保证区分与真实板面重合的干扰。"},
+        {"id":"prefilter_window","type":"double","label":"局部板面窗口长度","default":12.0,"min":0.1,"max":1000.0,"step":1.0,"decimals":3,"description":"沿工件长度使用75%重叠窗口；过大会混合折角或曲率，过小可能只覆盖单条扫描线。窗口须不少于表面容差的4倍。"},
+        {"id":"prefilter_distance","type":"double","label":"板面保留距离","default":0.8,"min":0.001,"max":20.0,"step":0.1,"decimals":3,"description":"点到受支持局部板面的最大距离。调小会增加删除量，也可能损失真实表面。不是定位精度保证。"},
+        {"id":"prefilter_min_support","type":"int","label":"面片最少采样支持","default":12,"min":6,"max":1024,"description":"每窗口每轮最多采样1024点，拟合面必须具有二维分布；密集单扫描线不算面片。"}
+      ]
+    },
     {
       "id": "slices",
       "title": "平行切片（输入坐标单位，默认 mm）",

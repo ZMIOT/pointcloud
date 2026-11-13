@@ -26,6 +26,10 @@ struct Config {
     int planeCandidates = 6;
     int maxRansacPoints = 60000;
     int minPlanePoints = 200;
+    bool prefilterEnabled = true;
+    double prefilterWindow = 12.0;
+    double prefilterDistance = 0.8;
+    int prefilterMinSupport = 12;
     double denoiseRadius = 2.5;
     int minNeighbors = 3;
     double bendDeviation = 2.0;
@@ -122,6 +126,12 @@ struct Result {
     bool ok = false;
     bool cancelled = false;
     std::string message;
+    bool prefilterApplied = false;
+    std::vector<unsigned char> surfaceMask; // Input-position mask, never source IDs.
+    std::vector<int> retainedIndices;
+    std::vector<int> rejectedIndices;
+    std::size_t prefilterPatches = 0;
+    std::size_t prefilterUnsupportedWindows = 0;
     Plane reference;
     Vec3 referenceOrigin = Vec3::Zero();
     Vec3 referenceLongitudinal = Vec3::UnitX();
@@ -145,7 +155,7 @@ struct Result {
 struct Hooks {
     std::function<bool()> cancelled;
     std::function<void(int)> progress;
-    // 0 reference plane, 1 slices, 2 selected B, 3 intersection C, 4 fitted line/white points.
+    // 0 reference plane, 5 surface prefilter, 1 slices, 2 B, 3 C, 4 fitted line/white points.
     std::function<bool(int, const Result &)> stage;
     std::function<void(const Plane &, std::size_t, std::size_t, std::size_t, double,
                        double, double)>

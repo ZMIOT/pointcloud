@@ -1,5 +1,6 @@
 #include "CorrugatedPanel.h"
 #include "SurfaceIntersection.h"
+#include "SurfaceFilter.h"
 
 #include <Eigen/Eigenvalues>
 #include <algorithm>
@@ -736,13 +737,14 @@ struct CellHash {
 
 SliceEvaluation evaluateSlice(const std::vector<Point> &points,
                               const ReferenceModel &reference,
-                              const Config &config, int side, double offset) {
+                              const Config &config, int side, double offset,
+                              const std::vector<unsigned char> &surfaceMask) {
     SliceEvaluation result;
     result.side = side;
     result.offset = offset;
     const double half = config.sliceThickness * 0.5;
     for (std::size_t i = 0; i < points.size(); ++i) {
-        if (!finite(points[i].xyz))
+        if (!surfaceMask[i] || !finite(points[i].xyz))
             continue;
         const double signedDistance = signedReferenceDistance(reference, points[i].xyz);
         if (std::abs(double(side) * signedDistance - offset) <= half)
@@ -1301,6 +1303,11 @@ bool fitTrajectoryLines(const std::vector<ProjectedPoint> &trajectory,
 }
 
 std::string validateConfig(const Config &config) {
+    if (!std::isfinite(config.prefilterWindow) || config.prefilterWindow <= 0 ||
+        !std::isfinite(config.prefilterDistance) || config.prefilterDistance <= 0 ||
+        config.prefilterMinSupport < 6 || config.prefilterMinSupport > 1024 ||
+        config.prefilterWindow < 4*config.prefilterDistance)
+        return "前置滤波窗口须不少于表面容差的4倍，容差须为正，最少支持点须在6至1024之间。";
     if (!std::isfinite(config.maxSurfaceExtrapolation) || config.maxSurfaceExtrapolation < 0.0 ||
         !std::isfinite(config.surfaceFitTolerance) || config.surfaceFitTolerance <= 0.0 ||
         config.minSurfacePoints < 6 || !std::isfinite(config.minIntersectionAngleDegrees) ||
@@ -1423,6 +1430,11 @@ Result extract(const std::vector<Point> &points, const Config &config, const Hoo
         return result;
     }
 
+    if (!filterPanelSurfaces(points, config, hooks, result)) return result;
+    if (!stage(hooks, 5, result)) {
+        result.cancelled = true;
+        return result;
+    }
     result.slices.resize(6);
 #ifdef BWB_HAS_OPENMP
 #pragma omp parallel for schedule(dynamic, 1)
@@ -1432,7 +1444,7 @@ Result extract(const std::vector<Point> &points, const Config &config, const Hoo
         const int offsetIndex = task % 3;
         result.slices[std::size_t(task)] = evaluateSlice(
             points, referenceModel, config, side,
-            config.sliceOffsets[std::size_t(offsetIndex)]);
+            config.sliceOffsets[std::size_t(offsetIndex)], result.surfaceMask);
     }
     if (stopped(hooks)) {
         result.cancelled = true;

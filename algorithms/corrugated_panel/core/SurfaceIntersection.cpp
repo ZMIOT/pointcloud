@@ -205,7 +205,8 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
     std::vector<std::pair<double, int>> ordered, seeds;
     ordered.reserve(points.size());
     for (std::size_t i = 0; i < points.size(); ++i)
-        if (points[i].xyz.allFinite()) ordered.emplace_back(coordinate(points[i].xyz), int(i));
+        if ((result.surfaceMask.empty() || result.surfaceMask[i]) && points[i].xyz.allFinite())
+            ordered.emplace_back(coordinate(points[i].xyz), int(i));
     for (int i : result.selectedIndices) seeds.emplace_back(coordinate(points[std::size_t(i)].xyz), i);
     std::sort(ordered.begin(), ordered.end());
     std::sort(seeds.begin(), seeds.end());
