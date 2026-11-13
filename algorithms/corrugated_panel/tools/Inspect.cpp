@@ -113,6 +113,8 @@ int main(int argc, char **argv) {
               << result.reference.normal.y() << ' ' << result.reference.normal.z() << ' '
               << result.reference.d << '\n'
               << "a_points=" << result.referenceIndices.size() << '\n'
+              << "reference_origin=" << result.referenceOrigin.transpose() << '\n'
+              << "reference_longitudinal=" << result.referenceLongitudinal.transpose() << '\n'
               << "a_plane_count=" << result.referenceSegments.size() << '\n'
               << "selected_slice=" << result.selectedSlice << '\n'
               << "b_points=" << result.selectedIndices.size() << '\n'
@@ -177,7 +179,7 @@ int main(int argc, char **argv) {
         writePoints(directory / "c_intersection.xyz", result.projected);
         writePoints(directory / "c_feature_curve.xyz", result.projected);
         std::ofstream stations(directory / "intersection_stations.tsv");
-        stations << "longitudinal\tvalid\treference_index\tsupport\tdegree\trms\textrapolation\tboundary_intersection_gap\tis_projection_fallback\tintersection_failure\tfinal_failure\tsupport_min_height\tsupport_max_height\tattempted_extrapolation\n";
+        stations << "longitudinal\tvalid\treference_index\tsupport\tdegree\trms\textrapolation\tboundary_intersection_gap\tis_projection_fallback\tintersection_failure\tfinal_failure\tsupport_min_height\tsupport_max_height\tattempted_extrapolation\tlocal_patch_extension\tlocal_patch_prediction_spread\tbroad_model_failure\tx\ty\tz\tdx_dh\tdy_dh\tdz_dh\n";
         for (const auto &s : result.intersectionStations)
             stations << s.longitudinal << '\t' << s.valid << '\t' << s.point.referenceIndex
                      << '\t' << s.point.supportCount << '\t' << s.point.surfaceDegree << '\t'
@@ -185,7 +187,11 @@ int main(int argc, char **argv) {
                      << s.boundaryIntersectionGap << '\t' << s.point.projectionFallback << '\t'
                      << s.intersectionFailure << '\t' << s.failure << '\t'
                      << s.supportMinHeight << '\t' << s.supportMaxHeight << '\t'
-                     << s.attemptedExtrapolation << '\n';
+                     << s.attemptedExtrapolation << '\t' << s.localPatchExtension << '\t'
+                     << s.localPatchPredictionSpread << '\t' << s.broadModelFailure << '\t'
+                     << std::setprecision(12) << s.point.xyz.x() << '\t' << s.point.xyz.y() << '\t'
+                     << s.point.xyz.z() << '\t' << s.surfaceHeightDirection.x() << '\t'
+                     << s.surfaceHeightDirection.y() << '\t' << s.surfaceHeightDirection.z() << '\n';
         writePoints(directory / "trajectory.xyz", result.trajectory);
         writePoints(directory / "measured_curve.xyz", result.trajectory);
         writePoints(directory / "fitted_line.xyz", result.fittedLine);

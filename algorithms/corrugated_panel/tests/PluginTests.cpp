@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
         require(fw::Parameters::validateSchema(schema).isEmpty(), "invalid parameter schema");
         const auto parameters = fw::Parameters::defaults(schema);
         require(schema.value("parameterVersion").toInt() == 5 &&
-                    plugin->descriptor().version == "1.7.1", "plugin version mismatch");
+                    plugin->descriptor().version == "1.7.2", "plugin version mismatch");
         fw::ParameterSet old{{"trajectory_spacing", 3.0}}, migrated;
         QString migrationError;
         require(plugin->migrateParameters(3, old, migrated, migrationError) &&
@@ -243,6 +243,13 @@ int main(int argc, char **argv) {
                 continue;
             }
             require(segments.size() == 2, "plugin sample must have two A planes");
+            if (sample52 || sample3) {
+                const auto surface = realResult.metrics.value("surface_intersection").toObject();
+                require(!surface.value("used_projection_fallback").toBool() &&
+                            surface.value("intersection_valid_stations").toInt() == (sample52 ? 385 : 383) &&
+                            surface.value("local_patch_validated_stations").toInt() == (sample52 ? 63 : 1),
+                        "float path lost stable local-face extension or reverted to projection");
+            }
             for (const auto &entry : segments) {
                 const auto segment = entry.toObject();
                 require(segment.value("point_count").toInt() > 78000 &&

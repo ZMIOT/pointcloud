@@ -1,5 +1,6 @@
 #include "SurfaceIntersection.h"
 #include <Eigen/Cholesky>
+#include <Eigen/LU>
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -110,6 +111,66 @@ double arcLength(const Model &model, double low, double high, double depthFactor
         length += std::hypot(1.0 / depthFactor, model.slope(h));
     }
     return length * (high - low) / 64.0;
+}
+
+// A thin, planar body patch can determine a reliable direction even when the
+// distance to A exceeds its observed width. Test prediction stability at A,
+// not just training residual, before allowing that limited extension.
+bool stableLocalPatch(std::vector<Sample> &support, Model &model, double seedH,
+                      const Config &config, double halfWidth, double depthFactor,
+                      double &predictionSpread) {
+    for (double radius : {config.sliceThickness*4.0, config.sliceThickness*2.0,
+                          config.sliceThickness}) {
+        std::vector<Sample> patch;
+        for (const auto &p : support)
+            if (std::abs(p.h-seedH) <= radius) patch.push_back(p);
+        if (patch.size() < std::size_t(config.minSurfacePoints)) continue;
+        double low = patch.front().h, high = low;
+        for (const auto &p : patch) { low = std::min(low,p.h); high = std::max(high,p.h); }
+        if (high-low < config.sliceThickness) continue;
+        // A line-like sample cannot determine a face direction. Require
+        // independent longitudinal and height support in normalized coordinates.
+        Eigen::Vector2d mean = Eigen::Vector2d::Zero();
+        Eigen::Matrix2d scatter = Eigen::Matrix2d::Zero();
+        for (const auto &p : patch)
+            mean += Eigen::Vector2d((p.h-low)/(high-low),p.s/halfWidth);
+        mean /= double(patch.size());
+        for (const auto &p : patch) {
+            const Eigen::Vector2d delta = Eigen::Vector2d((p.h-low)/(high-low),p.s/halfWidth)-mean;
+            scatter.noalias() += delta*delta.transpose();
+        }
+        if (scatter.determinant() <= 1e-4*scatter.trace()*scatter.trace()) continue;
+        const auto candidate = fit(patch, 1, config.surfaceFitTolerance, halfWidth);
+        if (!candidate.valid || candidate.rms > config.surfaceFitTolerance) continue;
+        const double angle = std::atan2(1.0, std::abs(candidate.slope(0))*depthFactor)*180.0/pi;
+        const double extension = arcLength(candidate,0,low,depthFactor);
+        if (angle < config.minIntersectionAngleDegrees ||
+            extension > config.maxSurfaceExtrapolation+1e-8 ||
+            extension > 4.0*arcLength(candidate,low,high,depthFactor)+1e-8) continue;
+
+        // Independent lower/upper strips expose curvature and changing face
+        // direction; alternating layers expose scan-layer sensitivity.
+        std::vector<Sample> lower, upper;
+        for (const auto &p : patch)
+            (p.h < (low+high)*0.5 ? lower : upper).push_back(p);
+        const Model checks[] = {
+            fit(lower,1,config.surfaceFitTolerance,halfWidth),
+            fit(upper,1,config.surfaceFitTolerance,halfWidth),
+            fit(patch,1,config.surfaceFitTolerance,halfWidth,0),
+            fit(patch,1,config.surfaceFitTolerance,halfWidth,1)};
+        bool stable = true;
+        double spread = 0;
+        for (const auto &check : checks) {
+            if (!check.valid || check.rms > config.surfaceFitTolerance) { stable = false; break; }
+            spread = std::max(spread, std::abs(check.value(0)-candidate.value(0)));
+        }
+        if (!stable || spread > config.surfaceFitTolerance) continue;
+        support = std::move(patch);
+        model = candidate;
+        predictionSpread = spread;
+        return true;
+    }
+    return false;
 }
 }
 
@@ -291,7 +352,7 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
             station.failure = ambiguous ? "ambiguous_surface_branch" : "insufficient_surface_support";
             result.intersectionStations.push_back(station); continue;
         }
-        const double minH = std::min_element(support.begin(), support.end(), [](const Sample &a, const Sample &b) { return a.h < b.h; })->h;
+        double minH = std::min_element(support.begin(), support.end(), [](const Sample &a, const Sample &b) { return a.h < b.h; })->h;
         std::map<int, int> occupied;
         double maxH = minH;
         for (const auto &p : support) { ++occupied[p.layer]; maxH = std::max(maxH, p.h); }
@@ -315,14 +376,35 @@ bool recoverSurfaceIntersection(const std::vector<Point> &points, const Config &
         if (!model.valid || model.rms > config.surfaceFitTolerance) station.failure = "surface_fit_residual";
         const double angle = std::atan2(1.0, std::abs(model.slope(0.0)) * depthFactor) * 180.0 / pi;
         if (station.failure.empty() && angle < config.minIntersectionAngleDegrees) station.failure = "near_tangent_intersection";
-        const double extrapolation = arcLength(model, 0.0, minH, depthFactor);
+        double extrapolation = arcLength(model, 0.0, minH, depthFactor);
         const double observedSpan = arcLength(model, minH, maxH, depthFactor);
         station.point.extrapolated = minH > 1e-8;
         station.point.extrapolationDistance = extrapolation;
         station.attemptedExtrapolation = extrapolation;
         if (station.failure.empty() && (extrapolation > config.maxSurfaceExtrapolation + 1e-8 ||
                                        extrapolation > observedSpan + 1e-8)) station.failure = "surface_extrapolation_limit";
+        if (station.failure == "surface_fit_residual" || station.failure == "surface_extrapolation_limit") {
+            const auto originalFailure = station.failure;
+            if (stableLocalPatch(support, model, seedH, config, halfWidth, depthFactor,
+                                 station.localPatchPredictionSpread)) {
+                station.localPatchExtension = true;
+                station.broadModelFailure = originalFailure;
+                station.failure.clear();
+                minH = support.front().h;
+                maxH = minH;
+                for (const auto &p : support) { minH = std::min(minH,p.h); maxH = std::max(maxH,p.h); }
+                station.supportMinHeight = minH;
+                station.supportMaxHeight = maxH;
+                station.point.supportCount = std::uint32_t(support.size());
+                station.point.surfaceRms = model.rms;
+                station.point.surfaceDegree = model.degree;
+                extrapolation = arcLength(model,0,minH,depthFactor);
+                station.point.extrapolationDistance = extrapolation;
+                station.attemptedExtrapolation = extrapolation;
+            }
+        }
         station.point.xyz = anchor + u * model.value(0.0);
+        station.surfaceHeightDirection = side*v/depthFactor + u*model.slope(0.0);
         station.longitudinalTangent = l-v*(plane.normal.dot(l)/depthFactor) +
             u*(model.coefficients[2]/model.sScale);
         const auto representative = std::min_element(support.begin(), support.end(), [](const Sample &a, const Sample &b) {

@@ -34,7 +34,7 @@
       "id": "surface_intersection",
       "title": "避开焊接边缘的主体延伸（输入单位，默认 mm）",
       "parameters": [
-        {"id":"max_surface_extrapolation","type":"double","label":"主体到 A 最大延伸弧长","default":40.0,"min":0.0,"max":100.0,"step":0.5,"decimals":3,"description":"仅在切片限定的主体高度带拟合，默认 8.5～31.5 mm，排除靠近 A 的焊接边缘。延伸到 A 的弧长不得超过本值及观测跨度；不满足时按开关整线投影。旧配置的显式数值保持不变。"},
+        {"id":"max_surface_extrapolation","type":"double","label":"主体到 A 最大延伸弧长","default":40.0,"min":0.0,"max":100.0,"step":0.5,"decimals":3,"description":"仅在离开焊接边缘的主体带内拟合。普通模型延伸不超过观测跨度；通过分条和分层方向稳定性验证的 B 附近小面片可延伸至观测跨度的 4 倍，但始终不得超过本值。不满足时按开关整线投影，投影不是交线。旧配置显式数值保留。"},
         {"id":"surface_fit_tolerance","type":"double","label":"表面截面拟合容差","default":0.6,"min":0.001,"max":20.0,"step":0.1,"decimals":3},
         {"id":"min_surface_points","type":"int","label":"表面最少支持点","default":20,"min":6,"max":100000},
         {"id":"min_intersection_angle","type":"double","label":"最小求交角（度）","default":10.0,"min":0.1,"max":89.0,"step":1.0,"decimals":2},

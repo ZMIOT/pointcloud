@@ -92,11 +92,15 @@ struct IntersectionStation {
     ProjectedPoint point;
     ProjectedPoint projectionCandidate;
     Vec3 longitudinalTangent = Vec3::Zero();
+    Vec3 surfaceHeightDirection = Vec3::Zero(); // dX/dh at A for the attempted surface model.
     Vec3 projectionTangent = Vec3::Zero();
     double boundaryIntersectionGap = 0.0;
     double supportMinHeight = 0.0;
     double supportMaxHeight = 0.0;
     double attemptedExtrapolation = 0.0;
+    bool localPatchExtension = false; // Validated local face direction, not projection.
+    double localPatchPredictionSpread = 0.0;
+    std::string broadModelFailure; // Preserved even when the local patch succeeds.
     bool hasProjectionCandidate = false;
     bool valid = false;
     std::string failure;

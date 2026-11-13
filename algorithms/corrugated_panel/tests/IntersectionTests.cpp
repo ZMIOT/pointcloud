@@ -99,6 +99,51 @@ void weldedEdgeInvariant(const Eigen::Matrix3d &rotation, const bwb::Vec3 &trans
                 "edge bead changed nominal body trajectory");
     std::cout << "excluded weld invariance passed\n";
 }
+
+Fixture thinPatch(double curvature = 0.0, double top = 15.0) {
+    auto f = fixture(0.4,curvature);
+    f.points.erase(std::remove_if(f.points.begin(),f.points.end(),
+                                [=](const bwb::Point &p) { return p.xyz.z() > top; }),f.points.end());
+    f.result.selectedIndices.clear();
+    for (std::size_t i=0; i<f.points.size(); ++i) {
+        f.points[i].source = std::uint32_t(i);
+        if (std::abs(f.points[i].xyz.z()-10) <= 1.5) f.result.selectedIndices.push_back(int(i));
+    }
+    return f;
+}
+
+void thinFaceExtension(const Eigen::Matrix3d &r, const bwb::Vec3 &translation, int side = 1) {
+    auto f = thinPatch();
+    // Welded edge is deliberately unrelated to the intended body-face extension.
+    for (auto &p : f.points) {
+        if (p.xyz.z() < 8.5) p.xyz.y() += 15.0;
+        p.xyz.z() *= side;
+        p.xyz = r*p.xyz + translation;
+    }
+    f.result.referenceOrigin = translation;
+    f.result.slices[0].side = side;
+    f.result.referenceLongitudinal = r*bwb::Vec3::UnitX();
+    auto &a = f.result.referenceSegments[0].plane;
+    a.normal = r*bwb::Vec3::UnitZ();
+    a.d = -a.normal.dot(translation);
+    auto config = bwb::Config{};
+    config.allowProjectionFallback = false;
+    require(bwb::recoverSurfaceIntersection(f.points,config,{},f.result), f.result.message);
+    for (const auto &s : f.result.intersectionStations) {
+        const auto p = (r.transpose()*(s.point.xyz-translation)).eval();
+        require(s.localPatchExtension && !s.point.projectionFallback &&
+                    s.broadModelFailure == "surface_extrapolation_limit",
+                "thin face must use validated direction, not B projection");
+        require(std::abs(p.y()-0.1*p.x()) < 1e-5 && std::abs(p.z()) < 1e-6,
+                "thin oblique face intersection is wrong (projection would be 4 mm away)");
+        require(s.localPatchPredictionSpread < 1e-5 && s.supportMinHeight >= 8.5-1e-7,
+                "unstable direction or welded edge entered local patch");
+        const auto d = (r.transpose()*s.surfaceHeightDirection).eval();
+        require((d-bwb::Vec3(0,0.4,double(side))).norm() < 1e-6,
+                "reported extension direction is not the surface direction");
+    }
+    std::cout << "thin oblique face extension passed\n";
+}
 }
 int main() {
     try {
@@ -114,6 +159,34 @@ int main() {
         weldedEdgeInvariant(identity, zero);
         weldedEdgeInvariant(Eigen::AngleAxisd(1.1, bwb::Vec3(1,2,-3).normalized())
                                 .toRotationMatrix(), {100000,-250000,50000});
+        thinFaceExtension(identity,zero);
+        thinFaceExtension(identity,zero,-1);
+        thinFaceExtension(Eigen::AngleAxisd(1.1,bwb::Vec3(1,2,-3).normalized())
+                              .toRotationMatrix(), {100000,-250000,50000});
+        rejected(thinPatch(0.03), "surface_extrapolation_limit");
+        rejected(thinPatch(0,10.75), "insufficient_height_span");
+        auto distant = fixture(0.4,0);
+        distant.result.selectedIndices.clear();
+        for (std::size_t i=0; i<distant.points.size(); ++i)
+            if (std::abs(distant.points[i].xyz.z()-30) <= 1.5)
+                distant.result.selectedIndices.push_back(int(i));
+        auto distantConfig = bwb::Config{};
+        distantConfig.sliceOffsets = {{30,40,50}};
+        rejected(std::move(distant), "surface_extrapolation_limit", distantConfig);
+        auto lineOnly = fixture(0.4,0);
+        lineOnly.points.clear();
+        lineOnly.result.selectedIndices.clear();
+        for (int i=0; i<=260; ++i) {
+            const double h=8.5+i*0.025, s=h-10;
+            lineOnly.points.push_back({{s,0.1*s+0.4*h,h},std::uint32_t(i)});
+            if (h<=11.5) lineOnly.result.selectedIndices.push_back(i);
+        }
+        auto strictFace = bwb::Config{};
+        strictFace.allowProjectionFallback = false;
+        require(!bwb::recoverSurfaceIntersection(lineOnly.points,strictFace,{},lineOnly.result) &&
+                    std::none_of(lineOnly.result.intersectionStations.begin(),lineOnly.result.intersectionStations.end(),
+                        [](const bwb::IntersectionStation &s) { return s.localPatchExtension; }),
+                "collinear points must not be accepted as a two-dimensional face");
         auto strictLimit = bwb::Config{};
         strictLimit.maxSurfaceExtrapolation = 8.0;
         rejected(fixture(0,0,6), "surface_extrapolation_limit", strictLimit);
