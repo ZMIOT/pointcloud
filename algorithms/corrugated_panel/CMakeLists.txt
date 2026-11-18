@@ -22,6 +22,7 @@ add_library(CorrugatedPanelCore STATIC
   core/SurfaceIntersection.cpp
   core/SurfaceFilter.cpp
   core/CorrugatedPanel.h)
+set_target_properties(CorrugatedPanelCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(CorrugatedPanelCore PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core>
   ${EIGEN_INCLUDE_DIRS})
@@ -37,6 +38,55 @@ framework_add_plugin(CorrugatedPanelAlgorithm TYPE algorithm
   PARAMETER_VERSION 6
   SOURCES MyAlgorithm.cpp parameters.qrc)
 target_link_libraries(CorrugatedPanelAlgorithm PRIVATE CorrugatedPanelCore)
+
+add_library(PointCloudWeldSdk SHARED
+  sdk/ConfigIO.cpp
+  sdk/ConfigIO.h
+  sdk/PointCloudWeldSdk.cpp
+  sdk/PointCloudWeldSdk.h)
+target_compile_definitions(PointCloudWeldSdk PRIVATE PCWS_SDK_EXPORTS)
+target_include_directories(PointCloudWeldSdk PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/sdk>
+  $<INSTALL_INTERFACE:include>)
+target_link_libraries(PointCloudWeldSdk PRIVATE CorrugatedPanelCore)
+set_target_properties(PointCloudWeldSdk PROPERTIES OUTPUT_NAME PointCloudWeldSdk)
+
+install(TARGETS PointCloudWeldSdk
+  RUNTIME DESTINATION bin COMPONENT PointCloudWeldSdk
+  LIBRARY DESTINATION lib COMPONENT PointCloudWeldSdk
+  ARCHIVE DESTINATION lib COMPONENT PointCloudWeldSdk)
+install(FILES sdk/PointCloudWeldSdk.h
+  DESTINATION include COMPONENT PointCloudWeldSdk)
+install(FILES sdk/parameters.json
+  DESTINATION config COMPONENT PointCloudWeldSdk)
+install(FILES sdk/README.md
+  DESTINATION . COMPONENT PointCloudWeldSdk)
+if(MSVC)
+  get_filename_component(PCWS_COMPILER_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  get_filename_component(PCWS_VC_ROOT
+    "${PCWS_COMPILER_BIN}/../../../../../.." ABSOLUTE)
+  if(OpenMP_CXX_FOUND)
+    file(GLOB PCWS_OPENMP_RUNTIMES
+      "${PCWS_VC_ROOT}/Redist/MSVC/*/x64/Microsoft.VC*.OpenMP/vcomp140.dll")
+    if(PCWS_OPENMP_RUNTIMES)
+      list(SORT PCWS_OPENMP_RUNTIMES COMPARE NATURAL ORDER DESCENDING)
+      list(GET PCWS_OPENMP_RUNTIMES 0 PCWS_OPENMP_RUNTIME)
+      install(FILES "${PCWS_OPENMP_RUNTIME}"
+        DESTINATION bin COMPONENT PointCloudWeldSdk)
+    endif()
+  endif()
+  file(GLOB PCWS_CRT_DIRECTORIES LIST_DIRECTORIES true
+    "${PCWS_VC_ROOT}/Redist/MSVC/*/x64/Microsoft.VC*.CRT")
+  if(PCWS_CRT_DIRECTORIES)
+    list(SORT PCWS_CRT_DIRECTORIES COMPARE NATURAL ORDER DESCENDING)
+    list(GET PCWS_CRT_DIRECTORIES 0 PCWS_CRT_DIRECTORY)
+    install(FILES
+      "${PCWS_CRT_DIRECTORY}/msvcp140.dll"
+      "${PCWS_CRT_DIRECTORY}/vcruntime140.dll"
+      "${PCWS_CRT_DIRECTORY}/vcruntime140_1.dll"
+      DESTINATION bin COMPONENT PointCloudWeldSdk)
+  endif()
+endif()
 
 add_executable(CorrugatedPanelInspect tools/Inspect.cpp)
 target_link_libraries(CorrugatedPanelInspect PRIVATE CorrugatedPanelCore)
@@ -74,4 +124,9 @@ if(BUILD_TESTING)
     PLUGIN_PATH="$<TARGET_FILE:CorrugatedPanelAlgorithm>")
   add_dependencies(CorrugatedPanelPluginTests CorrugatedPanelAlgorithm)
   add_test(NAME corrugated_panel_plugin COMMAND CorrugatedPanelPluginTests)
+  add_executable(PointCloudWeldSdkTests tests/SdkTests.cpp)
+  target_link_libraries(PointCloudWeldSdkTests PRIVATE PointCloudWeldSdk)
+  target_compile_definitions(PointCloudWeldSdkTests PRIVATE
+    PCWS_PARAMETERS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sdk/parameters.json")
+  add_test(NAME corrugated_panel_sdk COMMAND PointCloudWeldSdkTests)
 endif()

@@ -184,3 +184,11 @@ Release 构建通过。CTest 的 6 项波纹板测试通过；框架测试首次
 测试新增`corrugated_panel_surface_filter`以及由`BWB_SAMPLE_118_PATH`启用的`corrugated_panel_sample118_prefilter`。插件测试核对保留/剔除记录的原始XYZ与自定义字段逐字节一致，并涵盖参数迁移、失败保留证据、调试及取消。52回归保留关闭过滤时63个小面片恢复站位的原断言；启用过滤后允许部分站位改由宽带模型直接通过，但必须保持385站覆盖、求交模式及折角数量，且与关闭过滤的对应曲线点位移小于0.1输入单位。该界限是退化检测，不是实物精度验收。
 
 Release 验证：11项波纹板CTest全部通过（150.58秒），`1/3/6/8/52/118/121.txt`全部启用，没有跳过真实样本；插件float路径包含118。已知几何合成用例中基准面、波纹面、平台面全部保留，体噪声/密集线等干扰剔除率约98.54%，并验证刚性变换后掩码一致。真实118核心double路径：输入5,779,410点，保留5,001,395点，剔除778,015点；A支持点1,351,011个不变，选择负侧10mm弯折切片，另一侧长直切片恢复。1,259个站位全部由主体延伸求交，0个主求交失败、无投影回退，生成1,329个轨迹采样、38个拟合控制点和269个白点。插件float路径剔除770,251点，同样通过1,259个有效求交站位、38个控制点和零求交失败断言；浮点精度会改变阈值附近候选及保留集合，不要求与double逐点相同。以上是内部几何与覆盖回归，真实三类表面尚无逐点人工标签，不能把剔除点全部视为已确认噪声。构建目录生成1.8.0插件，未替换安装目录的稳定DLL。
+
+### 独立 C ABI：PointCloudWeldSdk V1
+
+`sdk/PointCloudWeldSdk.h` 定义不依赖 Qt/PCL 的 C 接口。输入数组元素为 `PcwsFramePointV1`，包含 `uint64_t frame_number` 和毫米制 XYZ；同一帧允许多个点，帧号无需连续。调用方可先用 `PcwsLoadOptionsV1` 显式读取随包的 `config/parameters.json`，再把完整参数快照传给 `PcwsProcessV1`。`PcwsProcessV1` 同步运行当前 1.8.0 核心流程，`PcwsResultV1.sdkbase` 对应 `Result::projected`（C 特征候选点），`sdkclass` 对应 `Result::whitePoints`（白色均匀点），不通过读取或写入 `PreciseLaserPoint_SdkBase.txt`、`PreciseLaserPoint_Classified.txt` 交换数据。
+
+`scan_direction` 非零时规定两组输出首尾；全零时根据候选点关联的帧号递增排列。`profile_direction` 用于内外角、升降和高低平台分类；全零时使用算法恢复的横向轴。白点的 `base_index` 指向同次 `sdkbase` 的最近顺序位置，保持非递减；首尾类型固定为 Start/End，普通均匀点为 Normal。结果数组由 DLL 分配，调用方必须使用同一 DLL 的 `PcwsReleaseResultV1` 释放。
+
+CMake 目标 `PointCloudWeldSdk` 在 Release 下生成 `bin/Release/PointCloudWeldSdk.dll` 与 `lib/Release/PointCloudWeldSdk.lib`；安装规则同时交付 `include/PointCloudWeldSdk.h` 和 `config/parameters.json`。`corrugated_panel_sdk` 覆盖 JSON 参数读取、ABI 尺寸、非法参数、取消、帧号自动定向、显式反向、C/白点映射、索引单调性和重复释放。
